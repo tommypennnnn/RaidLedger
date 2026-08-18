@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Guild Raid Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<!-- Chart.js for the attendance trend -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:      #14110c;   /* dark parchment-backing */
+    --panel:   #1c1811;
+    --panel-2: #221d15;
+    --line:    #2f2820;
+    --ink:     #e7e2d6;   /* aged paper text */
+    --muted:   #9a9384;
+    --gold:    #c9a227;   /* guild seal gold */
+    --gold-dim:#8a7320;
+    --red:     #c65a4a;
+    --green:   #7fa663;
+    --radius:  10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #211b12 0%, var(--bg) 60%);
+    color: var(--ink);
+    font-family: Inter, system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  h1, h2, h3 { font-family: Cinzel, serif; letter-spacing: .02em; }
+  h1 { font-size: 1.6rem; margin: 0; color: var(--gold); }
+  h2 { font-size: 1.05rem; margin: 0 0 .75rem; color: var(--ink);
+       border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
+  a { color: var(--gold); }
+  .mono { font-family: "JetBrains Mono", monospace; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1rem 1.5rem; border-bottom: 1px solid var(--line);
+    background: linear-gradient(#1a1610, #14110c);
+  }
+  header .seal {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 2px solid var(--gold-dim);
+    display: grid; place-items: center; color: var(--gold);
+    font-family: Cinzel, serif; font-weight: 700; margin-right: .7rem;
+  }
+  header .brand { display: flex; align-items: center; }
+  header .right { display: flex; align-items: center; gap: .8rem;
+                  color: var(--muted); font-size: .9rem; }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1.5rem;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* ---- auth ---- */
+  .auth-card { max-width: 360px; margin: 12vh auto; text-align: center; }
+  input, select {
+    width: 100%; padding: .6rem .7rem; margin: .35rem 0;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; color: var(--ink); font: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid var(--gold-dim); }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--gold); color: #201a0c; border: none;
+    padding: .6rem 1rem; border-radius: 8px;
+  }
+  button.ghost { background: transparent; color: var(--muted);
+                 border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .error { color: var(--red); min-height: 1.2em; font-size: .9rem; }
+
+  /* ---- drop zones ---- */
+  .drop {
+    border: 1.5px dashed var(--gold-dim); border-radius: var(--radius);
+    padding: 1.4rem; text-align: center; cursor: pointer;
+    background: var(--panel-2); transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--gold); background: #26201699; }
+  .drop .big { font-family: Cinzel, serif; color: var(--ink); }
+  .drop .hint { color: var(--muted); font-size: .85rem; margin-top: .3rem; }
+  .drop input { display: none; }
+  .status { font-size: .85rem; color: var(--green); margin-top: .5rem;
+            min-height: 1.2em; }
+
+  .raid-form { display: grid; grid-template-columns: 1fr 2fr 1fr auto;
+               gap: .6rem; align-items: end; margin-top: 1rem; }
+  @media (max-width: 720px) { .raid-form { grid-template-columns: 1fr; } }
+  label { font-size: .8rem; color: var(--muted); display: block; }
+  #save-status { margin-top: .6rem; font-size: .9rem; }
+  #save-status.ok  { color: var(--green); }
+  #save-status.err { color: var(--red); }
+
+  /* ---- tables ---- */
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: .78rem;
+       text-transform: uppercase; letter-spacing: .04em; }
+  td.name { font-weight: 600; }
+  td.warn { color: var(--red); font-weight: 600; }
+  td.ok   { color: var(--green); font-weight: 600; }
+  tbody tr:hover { background: #1f1a12; }
+
+  .toolbar { display: flex; justify-content: space-between;
+             align-items: center; gap: 1rem; margin-bottom: .6rem; }
+  .count { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+  .warning { background: #2a2012; border: 1px solid var(--gold-dim);
+             color: #e6cf8f; padding: .7rem .9rem; border-radius: 8px;
+             font-size: .88rem; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+
+<!-- ===================== AUTH VIEW ===================== -->
+<section id="auth-view">
+  <div class="panel auth-card">
+    <div class="seal" style="margin:0 auto 1rem">RL</div>
+    <h1>Guild Raid Ledger</h1>
+    <p style="color:var(--muted);font-size:.9rem">Officers only. Sign in to continue.</p>
+    <input id="email" type="email" placeholder="officer email" autocomplete="username" />
+    <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+    <button id="sign-in" style="width:100%;margin-top:.5rem">Sign in</button>
+    <p id="auth-error" class="error"></p>
+  </div>
+</section>
+
+<!-- ===================== APP VIEW ===================== -->
+<section id="app-view" hidden>
+  <header>
+    <div class="brand">
+      <div class="seal">RL</div>
+      <div>
+        <h1>Guild Raid Ledger</h1>
+        <div style="color:var(--muted);font-size:.8rem">Raid performance &amp; loot tracking</div>
+      </div>
+    </div>
+    <div class="right">
+      <span id="who" class="mono"></span>
+      <button id="sign-out" class="ghost">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="officer-warning" class="warning" hidden>
+      Your account isn't in the <code>officers</code> table yet, so writes will be
+      blocked by Row Level Security. Add your user id in the Supabase SQL editor
+      (see the schema file, section 5).
+    </div>
+
+    <!-- UPLOAD -->
+    <div class="panel">
+      <h2>Upload a raid night</h2>
+      <div class="grid-2">
+        <div class="drop" id="drop-combat">
+          <div class="big">Combat log</div>
+          <div class="hint">Drop <span class="mono">WoWCombatLog.txt</span> or click to browse</div>
+          <input type="file" accept=".txt,text/plain" />
+          <div class="status" id="combat-status"></div>
+        </div>
+        <div class="drop" id="drop-loot">
+          <div class="big">RCLootCouncil export</div>
+          <div class="hint">Drop the JSON / CSV / Lua export or click to browse</div>
+          <input type="file" accept=".json,.csv,.txt,.lua" />
+          <div class="status" id="loot-status"></div>
+        </div>
+      </div>
+
+      <div class="raid-form">
+        <div>
+          <label for="raid-date">Date</label>
+          <input id="raid-date" type="date" />
+        </div>
+        <div>
+          <label for="raid-zone">Zone / instance</label>
+          <input id="raid-zone" type="text" placeholder="e.g. Amirdrassil" />
+        </div>
+        <div>
+          <label for="raid-difficulty">Difficulty</label>
+          <select id="raid-difficulty">
+            <option>Normal</option><option>Heroic</option>
+            <option>Mythic</option><option>LFR</option>
+          </select>
+        </div>
+        <div>
+          <button id="save-btn" disabled>Save to database</button>
+        </div>
+      </div>
+      <div id="save-status"></div>
+    </div>
+
+    <!-- ATTENDANCE CHART -->
+    <div class="panel">
+      <h2>Attendance over time</h2>
+      <canvas id="attendance-chart" height="90"></canvas>
+    </div>
+
+    <!-- RANKINGS -->
+    <div class="panel">
+      <h2>Player rankings</h2>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Player</th><th>Class</th><th>Attend.</th>
+              <th>Prep</th><th>Consum. eff.</th><th>Flask uptime</th>
+              <th>Death index</th><th>Items</th><th>Loot balance</th>
+            </tr>
+          </thead>
+          <tbody id="rankings-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- LOOT -->
+    <div class="panel">
+      <h2>Loot distribution</h2>
+      <div class="toolbar">
+        <input id="loot-search" type="text" placeholder="Search player, item, or boss…" style="max-width:320px;margin:0" />
+        <span class="count" id="loot-count"></span>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Player</th><th>Item</th><th>Boss</th><th>Response</th><th>Date</th></tr>
+          </thead>
+          <tbody id="loot-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</section>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
