@@ -483,6 +483,11 @@ async function renderUpload(){
       <div class="drop" id="drop-combat"><div class="big">Combat log</div><div class="hint">WoWCombatLog.txt</div><input type="file" accept=".txt,text/plain"/><div class="status info" id="cs"></div></div>
       <div class="drop" id="drop-loot"><div class="big">RCLootCouncil export</div><div class="hint">JSON / CSV / Lua</div><input type="file" accept=".json,.csv,.txt,.lua"/><div class="status info" id="ls"></div></div>
     </div>
+    <div style="margin-top:.8rem">
+      <label for="loot-paste">…or paste the RCLootCouncil export here (CSV / JSON / Lua)</label>
+      <textarea id="loot-paste" rows="4" placeholder="Paste the export code here" style="width:100%;font-family:monospace;font-size:.8rem;resize:vertical;padding:.55rem .7rem;border:1px solid var(--border2);border-radius:var(--radius-sm);background:var(--surface)"></textarea>
+      <button id="loot-paste-btn" class="btn ghost sm" style="margin-top:.4rem">Load pasted loot</button>
+    </div>
     <div class="raidform">
       <div><label>Date</label><input id="rdate" type="date"/></div>
       <div><label>Zone / instance</label><input id="rzone" type="text" placeholder="Serpentshrine Cavern"/></div>
@@ -517,6 +522,13 @@ async function renderUpload(){
     try{ staged.loot=parseRCLootCouncil(text); staged.lootText=text; staged.lootName=name;
       setStatus("ls",`✓ ${name}: ${staged.loot.loot.length} awards`,"ok");
     }catch(e){ setStatus("ls",`Couldn't parse: ${e.message}`,"err"); }
+  });
+  $("loot-paste-btn").addEventListener("click",()=>{
+    const txt=($("loot-paste").value||"").trim();
+    if(!txt){ setStatus("ls","Paste some loot text first.","err"); return; }
+    try{ staged.loot=parseRCLootCouncil(txt); staged.lootText=txt; staged.lootName="pasted";
+      setStatus("ls",`✓ pasted: ${staged.loot.loot.length} awards, ${staged.loot.players.length} players`,"ok");
+    }catch(e){ setStatus("ls",`Couldn't parse pasted loot: ${e.message}`,"err"); }
   });
   $("save").addEventListener("click",saveRaid);
   $("mbody").querySelectorAll("[data-del]").forEach((b)=>b.addEventListener("click",()=>deleteRaid(Number(b.dataset.del),b.dataset.lbl)));
