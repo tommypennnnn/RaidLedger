@@ -188,18 +188,29 @@ async function renderPlayers(){
 }
 
 // -------------------------------------------------------- PLAYER PROFILE
+const pctColor=(v)=> v>=80?"var(--good-ink)":v>=50?"var(--warn-ink)":"var(--bad-ink)";
+const pct=(v)=>`<span style="color:${pctColor(v)};font-weight:600">${v}%</span>`;
+let ppTrend=[]; // closure data for the switchable chart
+const TREND_METRICS={preparedness_score:"Preparedness",coverage_pct:"Flask/elixir coverage",flask_uptime_pct:"Flask uptime",food_uptime_pct:"Food uptime",consumable_efficiency:"Potion efficiency"};
+
 async function renderPlayerProfile(pid){
-  const [rankArr, prep, loot] = await Promise.all([
+  const [rankArr, prep, deaths, loot] = await Promise.all([
     sb.from("player_rankings").select("*").eq("player_id",pid).then(r=>r.data||[]),
-    sb.from("preparedness").select("preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
+    sb.from("preparedness").select("raid_id,preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,potions_used,potions_effective,flask_name,elixir_names,food_name,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
+    sb.from("raid_deaths").select("boss_name,cause,avoidable,raids(raid_date)").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("loot_history").select("item_name,source_boss,response,won_at,raids(raid_date)").eq("player_id",pid).order("won_at",{ascending:false}).then(r=>r.data||[]),
   ]);
-  const p = rankArr[0];
+  const p=rankArr[0];
   if(!p){ root().innerHTML=`<div class="card"><div class="empty">Player not found.</div></div>`; return; }
-  const trend = [...prep].sort((a,b)=>new Date(a.raids?.raid_date)-new Date(b.raids?.raid_date));
+  const byDate=[...prep].sort((a,b)=>new Date(a.raids?.raid_date)-new Date(b.raids?.raid_date));
+  ppTrend=byDate;
   const avg=(k)=> prep.length?Math.round(prep.reduce((a,r)=>a+r[k],0)/prep.length):0;
+  const consumCell=(r)=>{ const buff=r.flask_name?esc(r.flask_name):(r.elixir_names?esc(r.elixir_names):`<span style="color:var(--bad-ink)">no flask/elixir</span>`);
+    const food=r.food_name?esc(r.food_name):`<span style="color:var(--bad-ink)">no food</span>`;
+    return `<div style="font-size:.8rem;line-height:1.35">${buff}<br><span style="color:var(--muted)">${food}</span></div>`; };
+  const deathsByDate=[...deaths].sort((a,b)=>new Date(b.raids?.raid_date)-new Date(a.raids?.raid_date));
 
-  root().innerHTML = `
+  root().innerHTML=`
   <div class="back" id="back">← Players</div>
   <div class="card">
     <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
@@ -215,26 +226,57 @@ async function renderPlayerProfile(pid){
     </div>
   </div>
 
-  <div class="row">
-    <div class="card">
-      <h2>Preparedness breakdown</h2><div class="sub">Averaged across ${prep.length} raid${prep.length===1?"":"s"}.</div>
-      <div class="bars">
-        ${[["Flask/elixir coverage",avg("coverage_pct")],["Flask uptime",avg("flask_uptime_pct")],["Elixir uptime",avg("elixir_uptime_pct")],["Food uptime",avg("food_uptime_pct")],["Potion efficiency",avg("consumable_efficiency")]]
-          .map(([l,v])=>`<div class="barrow"><span class="lbl">${l}</span><div class="meter"><span style="width:${v}%;background:${meterColor(v)}"></span></div><span class="num">${v}</span></div>`).join("")}
-      </div>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+      <div><h2>Preparedness — per raid</h2><div class="sub" style="margin:0">What they actually ran each night. Averages up top; the nights are below.</div></div>
     </div>
-    <div class="card">
-      <h2>Deaths</h2><div class="sub">Across all logged raids.</div>
-      <div class="grid-stats" style="grid-template-columns:1fr 1fr;margin:0">
-        <div class="stat"><div class="label">Avoidable</div><div class="value num" style="color:var(--bad-ink)">${p.avoidable_deaths}</div></div>
-        <div class="stat"><div class="label">Unavoidable</div><div class="value num">${p.unavoidable_deaths}</div></div>
-      </div>
+    <div class="bars" style="margin:.9rem 0 1rem">
+      ${[["Coverage (flask or elixirs)","coverage_pct"],["Food uptime","food_uptime_pct"],["Potion efficiency","consumable_efficiency"]]
+        .map(([l,k])=>`<div class="barrow"><span class="lbl">${l}</span><div class="meter"><span style="width:${avg(k)}%;background:${meterColor(avg(k))}"></span></div><span class="num">${avg(k)}</span></div>`).join("")}
     </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort">Pots</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
+      <tbody>${byDate.map((r)=>`<tr>
+        <td>${fmtDate(r.raids?.raid_date)}</td>
+        <td class="num">${pct(r.coverage_pct)}</td>
+        <td class="num">${pct(r.flask_uptime_pct)}</td>
+        <td class="num">${pct(r.elixir_uptime_pct)}</td>
+        <td class="num">${pct(r.food_uptime_pct)}</td>
+        <td class="num">${r.potions_used}/${r.potions_effective}</td>
+        <td class="num" style="font-weight:600">${r.preparedness_score}</td>
+        <td>${consumCell(r)}</td></tr>`).join("")||`<tr><td colspan="8"><div class="empty">No raids recorded.</div></td></tr>`}</tbody>
+    </table></div>
+    <details style="margin-top:.7rem"><summary style="cursor:pointer;color:var(--muted);font-size:.85rem">How is the preparedness score calculated?</summary>
+      <div style="font-size:.85rem;color:var(--ink2);margin-top:.5rem;line-height:1.5">
+        Score (0–100) = <b>50% coverage</b> + <b>20% food</b> + <b>30% potion use</b>, measured only during boss fights.
+        <b>Coverage</b> is satisfied by a flask <i>or</i> by running both a battle and a guardian elixir, so a double-elixir raider isn't penalised for skipping a flask.
+        <b>Food</b> is the “Well Fed” buff uptime. <b>Potion use</b> rewards popping a combat potion on real pulls (not instant wipes). Weights are editable in <code>config.js</code>.
+      </div></details>
   </div>
 
   <div class="card">
-    <h2>Preparedness trend</h2><div class="sub">Score per raid night.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.4rem">
+      <h2>Trend</h2>
+      <select id="trend-metric" style="max-width:220px">${Object.entries(TREND_METRICS).map(([k,l])=>`<option value="${k}">${l}</option>`).join("")}</select>
+    </div>
     <canvas id="pp-chart" height="80"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Deaths — per raid</h2><div class="sub">Every death, the boss, and what killed them.</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Date</th><th class="no-sort">Boss</th><th class="no-sort">Killed by</th><th class="no-sort">Verdict</th></tr></thead>
+      <tbody>${deathsByDate.map((d)=>`<tr>
+        <td>${fmtDate(d.raids?.raid_date)}</td><td>${esc(d.boss_name)}</td><td>${esc(d.cause||"—")}</td>
+        <td>${d.avoidable?`<span class="tag bad">avoidable</span>`:`<span class="tag neutral">unavoidable</span>`}</td></tr>`).join("")||`<tr><td colspan="4"><div class="empty">No deaths recorded — clean raider. 🛡️</div></td></tr>`}</tbody>
+    </table></div>
+    <details style="margin-top:.7rem"><summary style="cursor:pointer;color:var(--muted);font-size:.85rem">How is avoidable vs unavoidable decided?</summary>
+      <div style="font-size:.85rem;color:var(--ink2);margin-top:.5rem;line-height:1.5">
+        The combat log doesn't label mechanics, so each death is judged by <b>what dealt the killing blow</b>.
+        If a boss's dangerous spells are listed in <code>AVOIDABLE_SPELL_IDS</code> (in <code>config.js</code>), a death caused by one of them is <b>avoidable</b> — this is the accurate mode.
+        Otherwise a fallback is used: killed by a boss <b>spell</b> or by <b>environmental</b> damage (fire, fall, lava) → <b>avoidable</b>; killed by a <b>melee</b> hit (sustained tank/melee damage the healers couldn't cover) → <b>unavoidable</b>.
+        The fallback is an approximation — for example a tank dying to a big physical cleave may show as avoidable. Listing each boss's real mechanics makes it exact.
+      </div></details>
   </div>
 
   <div class="card">
@@ -245,7 +287,9 @@ async function renderPlayerProfile(pid){
     </table></div>
   </div>`;
   $("back").addEventListener("click",()=>setView("players"));
-  drawTrend("pp-chart", trend.map((r)=>r.raids?.raid_date), trend.map((r)=>r.preparedness_score), "Preparedness", true);
+  const redraw=(key)=>{ killCharts(); drawTrend("pp-chart", ppTrend.map((r)=>r.raids?.raid_date), ppTrend.map((r)=>r[key]), TREND_METRICS[key], true); };
+  $("trend-metric").addEventListener("change",(e)=>redraw(e.target.value));
+  redraw("preparedness_score");
 }
 
 // ---------------------------------------------------------------- RAIDS
@@ -401,15 +445,19 @@ async function saveRaid(){
     const raid=await sb.from("raids").upsert(raidRow,{onConflict:"raid_date,zone_name,difficulty"}).select("id").single().then(r=>{ if(r.error) throw r.error; return r.data; });
     const raidId=raid.id;
 
-    const att=[],prep=[],perf=[];
+    const att=[],prep=[],perf=[],deathRows=[];
     for(const p of staged.combat.players){ const pid=idBy.get(p.name); if(!pid)continue;
       att.push({raid_id:raidId,player_id:pid,status:p.status});
-      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,preparedness_score:p.preparedness_score});
+      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,flask_name:p.flask_name,elixir_names:p.elixir_names,food_name:p.food_name,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,preparedness_score:p.preparedness_score});
       perf.push({raid_id:raidId,player_id:pid,avoidable_deaths:p.avoidable_deaths,unavoidable_deaths:p.unavoidable_deaths,death_cost_index:p.death_cost_index});
+      for(const d of (p.deaths_detail||[])) deathRows.push({raid_id:raidId,player_id:pid,boss_name:d.boss,cause:d.cause,avoidable:d.avoidable});
     }
     await up("attendance",att,"raid_id,player_id");
     await up("preparedness",prep,"raid_id,player_id");
     await up("performance",perf,"raid_id,player_id");
+    // deaths: replace this raid's rows (no natural key per death)
+    await sb.from("raid_deaths").delete().eq("raid_id",raidId);
+    if(deathRows.length){ const { error:de }=await sb.from("raid_deaths").insert(deathRows); if(de) throw new Error("raid_deaths: "+de.message); }
 
     if(staged.loot?.loot?.length){
       const lootRows=staged.loot.loot.map((l)=>{ const pid=idBy.get(l.player); if(!pid)return null;
