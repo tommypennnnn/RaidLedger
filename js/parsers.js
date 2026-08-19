@@ -134,10 +134,14 @@ function buildNight(encs,players){
     const coverage=Math.max(fU.pct,eU.pct);
 
     const casts=p.potionCasts.filter((ts)=>ts>=prepStart&&ts<=winEnd);
-    let potionsEffective=0; for(const ts of casts){ const e=encAt(ts); if(e&&e.durationSec>=SCORING.legitPullSeconds) potionsEffective++; }
+    let potionsEffective=0; const pullsWithPotion=new Set();
+    for(const ts of casts){ const e=encAt(ts); if(e&&e.durationSec>=SCORING.legitPullSeconds){ potionsEffective++; pullsWithPotion.add(e.start); } }
     const potionsUsed=casts.length;
     const consumableEfficiency=potionsUsed>0?(potionsEffective/potionsUsed)*100:0;
-    const potionScore=potionsEffective>=1?100:0;
+    // Potion component = on how many of the night's boss pulls did they use a
+    // potion? 7 of 10 bosses = 70%. Distinct pulls, so 2 potions on one boss
+    // still counts once.
+    const potionScore=legitPulls.length>0?clamp((pullsWithPotion.size/legitPulls.length)*100,0,100):0;
     const preparednessScore=SCORING.coverageWeight*coverage+SCORING.foodWeight*foU.pct+SCORING.potionWeight*potionScore;
 
     const flasksUsed=p.flaskAppliedTimes.filter((ts)=>ts>=prepStart&&ts<=winEnd).length;
