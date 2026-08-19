@@ -112,7 +112,9 @@ export function parseCombatLog(text){
       elixir_names:[...p.names.elixir].join(", ")||null,
       food_name:[...p.names.food][0]||null,
       potions_used:potionsUsed, potions_effective:potionsEffective,
-      consumable_efficiency:round1(consumableEfficiency), preparedness_score:round1(preparednessScore),
+      consumable_efficiency:round1(consumableEfficiency),
+      potion_score:round1(potionScore), legit_pulls:legitPulls.length,
+      preparedness_score:round1(preparednessScore),
       avoidable_deaths:avoidable, unavoidable_deaths:unavoidable, death_cost_index:round2(deathCostIndex),
       deaths_detail:p.deaths.map((d)=>({boss:d.boss,avoidable:d.avoidable,cause:d.cause})),
     });

@@ -1,7 +1,7 @@
 // =====================================================================
 //  app.js — router + views + Supabase integration
 // =====================================================================
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, SCORING } from "./config.js";
 import { parseCombatLog, parseRCLootCouncil, hashText } from "./parsers.js";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -196,7 +196,7 @@ const TREND_METRICS={preparedness_score:"Preparedness",coverage_pct:"Flask/elixi
 async function renderPlayerProfile(pid){
   const [rankArr, prep, deaths, loot] = await Promise.all([
     sb.from("player_rankings").select("*").eq("player_id",pid).then(r=>r.data||[]),
-    sb.from("preparedness").select("raid_id,preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,potions_used,potions_effective,flask_name,elixir_names,food_name,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
+    sb.from("preparedness").select("raid_id,preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,potion_score,legit_pulls,potions_used,potions_effective,flask_name,elixir_names,food_name,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("raid_deaths").select("boss_name,cause,avoidable,raids(raid_date)").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("loot_history").select("item_name,source_boss,response,won_at,raids(raid_date)").eq("player_id",pid).order("won_at",{ascending:false}).then(r=>r.data||[]),
   ]);
@@ -230,27 +230,41 @@ async function renderPlayerProfile(pid){
     <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
       <div><h2>Preparedness — per raid</h2><div class="sub" style="margin:0">What they actually ran each night. Averages up top; the nights are below.</div></div>
     </div>
-    <div class="bars" style="margin:.9rem 0 1rem">
-      ${[["Coverage (flask or elixirs)","coverage_pct"],["Food uptime","food_uptime_pct"],["Potion efficiency","consumable_efficiency"]]
-        .map(([l,k])=>`<div class="barrow"><span class="lbl">${l}</span><div class="meter"><span style="width:${avg(k)}%;background:${meterColor(avg(k))}"></span></div><span class="num">${avg(k)}</span></div>`).join("")}
+    <div style="margin:.9rem 0 1.1rem">
+      <div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--surface2)">
+        <span title="Coverage" style="width:${Math.round(avg("coverage_pct")*SCORING.coverageWeight)}%;background:var(--accent)"></span>
+        <span title="Food" style="width:${Math.round(avg("food_uptime_pct")*SCORING.foodWeight)}%;background:var(--good)"></span>
+        <span title="Potions on pulls" style="width:${Math.round(avg("potion_score")*SCORING.potionWeight)}%;background:var(--warn)"></span>
+      </div>
+      <div class="bars" style="margin-top:.8rem">
+        <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--accent)"></span> Coverage</span><div class="meter"><span style="width:${avg("coverage_pct")}%;background:var(--accent)"></span></div><span class="num">${avg("coverage_pct")}%</span></div>
+        <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--good)"></span> Food</span><div class="meter"><span style="width:${avg("food_uptime_pct")}%;background:var(--good)"></span></div><span class="num">${avg("food_uptime_pct")}%</span></div>
+        <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--warn)"></span> Potions on pulls</span><div class="meter"><span style="width:${avg("potion_score")}%;background:var(--warn)"></span></div><span class="num">${avg("potion_score")}%</span></div>
+      </div>
+      <div class="sub" style="margin-top:.6rem">
+        Score = <b>${Math.round(avg("coverage_pct")*SCORING.coverageWeight)}</b> coverage + <b>${Math.round(avg("food_uptime_pct")*SCORING.foodWeight)}</b> food + <b>${Math.round(avg("potion_score")*SCORING.potionWeight)}</b> potions = <b>${p.avg_preparedness}</b>
+      </div>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort">Pots</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
+      <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort" title="Potions used on boss pulls (effective / total pulls)">Potions</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
       <tbody>${byDate.map((r)=>`<tr>
         <td>${fmtDate(r.raids?.raid_date)}</td>
         <td class="num">${pct(r.coverage_pct)}</td>
         <td class="num">${pct(r.flask_uptime_pct)}</td>
         <td class="num">${pct(r.elixir_uptime_pct)}</td>
         <td class="num">${pct(r.food_uptime_pct)}</td>
-        <td class="num">${r.potions_used}/${r.potions_effective}</td>
+        <td class="num" title="${r.potions_used} used, ${r.potions_effective} effective (${r.consumable_efficiency}% efficiency)" style="color:${pctColor(r.potion_score)};font-weight:600">${r.potions_effective}/${r.legit_pulls}</td>
         <td class="num" style="font-weight:600">${r.preparedness_score}</td>
         <td>${consumCell(r)}</td></tr>`).join("")||`<tr><td colspan="8"><div class="empty">No raids recorded.</div></td></tr>`}</tbody>
     </table></div>
     <details style="margin-top:.7rem"><summary style="cursor:pointer;color:var(--muted);font-size:.85rem">How is the preparedness score calculated?</summary>
-      <div style="font-size:.85rem;color:var(--ink2);margin-top:.5rem;line-height:1.5">
-        Score (0–100) = <b>50% coverage</b> + <b>20% food</b> + <b>30% potion use</b>, measured only during boss fights.
-        <b>Coverage</b> is satisfied by a flask <i>or</i> by running both a battle and a guardian elixir, so a double-elixir raider isn't penalised for skipping a flask.
-        <b>Food</b> is the “Well Fed” buff uptime. <b>Potion use</b> rewards popping a combat potion on real pulls (not instant wipes). Weights are editable in <code>config.js</code>.
+      <div style="font-size:.85rem;color:var(--ink2);margin-top:.5rem;line-height:1.55">
+        Score (0–100) = <b>${Math.round(SCORING.coverageWeight*100)}% coverage</b> + <b>${Math.round(SCORING.foodWeight*100)}% food</b> + <b>${Math.round(SCORING.potionWeight*100)}% potions-on-pulls</b>, measured only during boss fights.<br><br>
+        <b>Coverage</b> is satisfied by a flask <i>or</i> by running both a battle and a guardian elixir, so a double-elixir raider isn't penalised for skipping a flask. <b>Food</b> is “Well Fed” uptime.<br><br>
+        <b>Two different potion numbers — don't confuse them:</b><br>
+        • <b>Potions column (e.g. 6/10):</b> drank a potion on 6 of the night's 10 boss pulls. <i>This is what the score uses.</i><br>
+        • <b>Efficiency (hover the Potions cell, e.g. 100%):</b> of the potions they drank, how many were well-timed (not wasted on a wipe). This does <i>not</i> feed the score.<br><br>
+        So a raider who drinks 6 well-timed potions across a 10-boss night shows <b>100% efficiency</b> but only <b>60% on-pulls</b> — the potion part contributes ${Math.round(SCORING.potionWeight*100)}% × 60 = ${Math.round(SCORING.potionWeight*60)} points, not the full ${Math.round(SCORING.potionWeight*100)}. That's why a perfectly-flasked, fed raider can sit at 88 rather than 100. Weights are editable in <code>config.js</code>.
       </div></details>
   </div>
 
@@ -448,7 +462,7 @@ async function saveRaid(){
     const att=[],prep=[],perf=[],deathRows=[];
     for(const p of staged.combat.players){ const pid=idBy.get(p.name); if(!pid)continue;
       att.push({raid_id:raidId,player_id:pid,status:p.status});
-      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,flask_name:p.flask_name,elixir_names:p.elixir_names,food_name:p.food_name,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,preparedness_score:p.preparedness_score});
+      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,flask_name:p.flask_name,elixir_names:p.elixir_names,food_name:p.food_name,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,potion_score:p.potion_score,legit_pulls:p.legit_pulls,preparedness_score:p.preparedness_score});
       perf.push({raid_id:raidId,player_id:pid,avoidable_deaths:p.avoidable_deaths,unavoidable_deaths:p.unavoidable_deaths,death_cost_index:p.death_cost_index});
       for(const d of (p.deaths_detail||[])) deathRows.push({raid_id:raidId,player_id:pid,boss_name:d.boss,cause:d.cause,avoidable:d.avoidable});
     }
