@@ -305,8 +305,43 @@ async function renderPlayerProfile(pid){
 
 // ---------------------------------------------------------------- RAIDS
 async function renderRaids(){
-  const manifest = await rows("raid_manifest");
+  const [manifest, att, players, raids] = await Promise.all([
+    rows("raid_manifest"),
+    sb.from("attendance").select("raid_id,player_id,status").then(r=>r.data||[]),
+    sb.from("player_rankings").select("player_id,name,class,attendance_pct").then(r=>r.data||[]),
+    sb.from("raids").select("id,raid_date,zone_name").order("raid_date",{ascending:true}).then(r=>r.data||[]),
+  ]);
+  // build attendance lookup: player_id -> raid_id -> status
+  const cell=new Map();
+  for(const a of att){ if(!cell.has(a.player_id)) cell.set(a.player_id,{}); cell.get(a.player_id)[a.raid_id]=a.status; }
+  const roster=[...players].sort((a,b)=>b.attendance_pct-a.attendance_pct||a.name.localeCompare(b.name));
+  const SC={present:"var(--good)",late:"#8bc34a",left_early:"#cddc39",bench:"var(--surface2)",absent:"var(--bad-soft)"};
+  const SYM={present:"",late:"L",left_early:"E",bench:"B",absent:"✗"};
+  const legend=[["present","Present"],["late","Late"],["left_early","Left early"],["bench","Bench"],["absent","Absent"]];
+
+  const grid = raids.length ? `
+    <div class="tablewrap">
+      <table style="border-collapse:separate;border-spacing:2px">
+        <thead><tr><th class="no-sort" style="text-align:left;position:sticky;left:0;background:var(--surface)">Player</th>
+          ${raids.map(r=>`<th class="no-sort" title="${esc(r.zone_name)} — ${fmtDate(r.raid_date)}" style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:.7rem;padding:.3rem .1rem;white-space:nowrap">${fmtDate(r.raid_date)}</th>`).join("")}
+        </tr></thead>
+        <tbody>${roster.map(p=>`<tr>
+          <td style="position:sticky;left:0;background:var(--surface);white-space:nowrap">${pname(p.name,p.class)}</td>
+          ${raids.map(r=>{ const s=cell.get(p.player_id)?.[r.id]; const bg=s?SC[s]:"transparent";
+            return `<td title="${esc(p.name)} · ${fmtDate(r.raid_date)} · ${s||"no record"}" style="width:22px;height:22px;text-align:center;border-radius:4px;background:${bg};color:#4b3a00;font-size:.65rem;font-weight:700;${s?'':'border:1px dashed var(--border2)'}">${s?SYM[s]:""}</td>`; }).join("")}
+        </tr>`).join("")}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:.7rem;font-size:.8rem;color:var(--muted)">
+      ${legend.map(([k,l])=>`<span style="display:inline-flex;align-items:center;gap:.35rem"><span style="width:14px;height:14px;border-radius:3px;background:${SC[k]};${k==='bench'?'border:1px solid var(--border2)':''}"></span>${l}</span>`).join("")}
+    </div>`
+    : `<div class="empty">No raids yet.</div>`;
+
   root().innerHTML = `
+  <div class="card">
+    <h2>Attendance grid</h2><div class="sub">Roster × raid night. Sorted by attendance — regulars at the top, patchy raiders at the bottom.</div>
+    ${grid}
+  </div>
   <div class="card">
     <h2>Raid nights</h2><div class="sub">Click a raid to see that night's report.</div>
     <div class="tablewrap"><table>
