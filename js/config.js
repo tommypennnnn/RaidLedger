@@ -49,6 +49,11 @@ export const SCORING = {
   instantWipeSeconds: 20, // shorter pull = instant wipe (potion wasted)
   legitPullSeconds:   30, // pull >= this = a "real" pull
 
+  // A continuous WoWCombatLog.txt is split into separate raid nights
+  // wherever there's a gap this long (hours) with no boss pulls. This also
+  // keeps a raid that crosses midnight as a single night.
+  sessionGapHours: 6,
+
   // Preparedness = coverage*W1 + food*W2 + potionUse*W3
   // coverage = flask up OR elixir up (credits flask AND double-elixir raiders)
   coverageWeight: 0.5,

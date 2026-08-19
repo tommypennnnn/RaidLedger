@@ -387,7 +387,7 @@ async function renderUpload(){
   root().innerHTML=`
   <div class="card">
     <h2>Upload a raid night</h2>
-    <div class="sub">Drop the files, check the details, save. Re-uploading the exact same file is detected and skipped.</div>
+    <div class="sub">Drop the files, check the details, save. A continuous log covering several nights is split into separate raids automatically. Re-uploading detects nights already imported and skips them.</div>
     <div class="drops">
       <div class="drop" id="drop-combat"><div class="big">Combat log</div><div class="hint">WoWCombatLog.txt</div><input type="file" accept=".txt,text/plain"/><div class="status info" id="cs"></div></div>
       <div class="drop" id="drop-loot"><div class="big">RCLootCouncil export</div><div class="hint">JSON / CSV / Lua</div><input type="file" accept=".json,.csv,.txt,.lua"/><div class="status info" id="ls"></div></div>
@@ -410,9 +410,15 @@ async function renderUpload(){
 
   wireDrop("drop-combat",(name,text)=>{
     try{ staged.combat=parseCombatLog(text); staged.combatText=text; staged.combatName=name;
-      const m=staged.combat.meta;
-      setStatus("cs",`✓ ${name}: ${staged.combat.players.length} players, ${m.encounters.length} encounters`,"ok");
-      $("rdate").value=m.raidDate; if(!$("rzone").value)$("rzone").value=m.zoneNameGuess; if(!$("rdiff").value)$("rdiff").value=m.difficulty;
+      const nights=staged.combat.raids;
+      if(nights.length===0){ setStatus("cs","No boss encounters found in this log.","err"); return; }
+      if(nights.length===1){ const m=nights[0].meta;
+        setStatus("cs",`✓ ${name}: 1 raid night — ${m.raidDate}, ${m.players.length} players, ${m.encounters.length} bosses`,"ok");
+        $("rdate").value=m.raidDate; if(!$("rzone").value)$("rzone").value=m.zoneNameGuess; if(!$("rdiff").value)$("rdiff").value=m.difficulty;
+      } else {
+        const list=nights.map((n)=>`${n.meta.raidDate} (${n.meta.encounters.length} bosses)`).join(", ");
+        setStatus("cs",`✓ ${name}: ${nights.length} raid nights detected — ${list}. Each saved separately with its own date.`,"ok");
+      }
       $("save").disabled=false;
     }catch(e){ setStatus("cs",`Couldn't parse: ${e.message}`,"err"); }
   });
@@ -438,52 +444,69 @@ function setStatus(id,msg,kind){ const el=$(id); el.textContent=msg; el.classNam
 async function saveRaid(){
   const btn=$("save"); btn.disabled=true; setStatus("ss","Saving…","info");
   try{
-    if(!staged.combat) throw new Error("Drop a combat log first.");
-    // dedupe: has this exact file been imported before?
-    const combatHash=await hashText(staged.combatText);
-    const dupe=await sb.from("imports").select("raid_id").eq("file_hash",combatHash).maybeSingle().then(r=>r.data);
-    if(dupe){ setStatus("ss",`This combat log was already imported (raid #${dupe.raid_id}). Skipped.`,"err"); btn.disabled=false; return; }
+    if(!staged.combat||!staged.combat.raids?.length) throw new Error("Drop a combat log first.");
+    const nights=staged.combat.raids;
 
-    // players
+    // upsert every player we know about (all nights + loot) once
     const classBy=new Map(); (staged.loot?.players||[]).forEach((p)=>classBy.set(p.name,p.class));
-    const names=new Set(staged.combat.players.map((p)=>p.name)); (staged.loot?.loot||[]).forEach((l)=>names.add(l.player));
+    const names=new Set(); nights.forEach((n)=>n.players.forEach((p)=>names.add(p.name)));
+    (staged.loot?.loot||[]).forEach((l)=>names.add(l.player));
     const { error:pe }=await sb.from("players").upsert([...names].map((n)=>({name:n,class:classBy.get(n)||null})),{onConflict:"name"}); if(pe) throw pe;
     const pd=await sb.from("players").select("id,name").in("name",[...names]).then(r=>r.data||[]);
     const idBy=new Map(pd.map((p)=>[p.name,p.id]));
 
-    // raid
-    const raidRow={ raid_date:$("rdate").value, zone_name:$("rzone").value||staged.combat.meta.zoneNameGuess, difficulty:$("rdiff").value||staged.combat.meta.difficulty };
-    const raid=await sb.from("raids").upsert(raidRow,{onConflict:"raid_date,zone_name,difficulty"}).select("id").single().then(r=>{ if(r.error) throw r.error; return r.data; });
-    const raidId=raid.id;
+    const lootAll=staged.loot?.loot||[];
+    const single=nights.length===1;
+    let saved=0, skipped=0;
 
-    const att=[],prep=[],perf=[],deathRows=[];
-    for(const p of staged.combat.players){ const pid=idBy.get(p.name); if(!pid)continue;
-      att.push({raid_id:raidId,player_id:pid,status:p.status});
-      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,flask_name:p.flask_name,elixir_names:p.elixir_names,food_name:p.food_name,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,potion_score:p.potion_score,legit_pulls:p.legit_pulls,preparedness_score:p.preparedness_score});
-      perf.push({raid_id:raidId,player_id:pid,avoidable_deaths:p.avoidable_deaths,unavoidable_deaths:p.unavoidable_deaths,death_cost_index:p.death_cost_index});
-      for(const d of (p.deaths_detail||[])) deathRows.push({raid_id:raidId,player_id:pid,boss_name:d.boss,cause:d.cause,avoidable:d.avoidable});
+    for(const night of nights){
+      const m=night.meta;
+      // per-night fingerprint so a growing log only adds new nights
+      const fp=await hashText(`night|${m.raidDate}|${m.encounters.map((e)=>e.id+":"+e.name).join(",")}`);
+      const dupe=await sb.from("imports").select("raid_id").eq("file_hash",fp).maybeSingle().then(r=>r.data);
+      if(dupe){ skipped++; continue; }
+
+      const raidRow={
+        raid_date: single ? ($("rdate").value||m.raidDate) : m.raidDate,
+        zone_name: single ? ($("rzone").value||m.zoneNameGuess) : m.zoneNameGuess,
+        difficulty: single ? ($("rdiff").value||m.difficulty) : m.difficulty,
+      };
+      const raid=await sb.from("raids").upsert(raidRow,{onConflict:"raid_date,zone_name,difficulty"}).select("id").single().then(r=>{ if(r.error) throw r.error; return r.data; });
+      const raidId=raid.id;
+
+      const att=[],prep=[],perf=[],deathRows=[];
+      for(const p of night.players){ const pid=idBy.get(p.name); if(!pid)continue;
+        att.push({raid_id:raidId,player_id:pid,status:p.status});
+        prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,flask_name:p.flask_name,elixir_names:p.elixir_names,food_name:p.food_name,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,potion_score:p.potion_score,legit_pulls:p.legit_pulls,preparedness_score:p.preparedness_score});
+        perf.push({raid_id:raidId,player_id:pid,avoidable_deaths:p.avoidable_deaths,unavoidable_deaths:p.unavoidable_deaths,death_cost_index:p.death_cost_index});
+        for(const d of (p.deaths_detail||[])) deathRows.push({raid_id:raidId,player_id:pid,boss_name:d.boss,cause:d.cause,avoidable:d.avoidable});
+      }
+      await up("attendance",att,"raid_id,player_id");
+      await up("preparedness",prep,"raid_id,player_id");
+      await up("performance",perf,"raid_id,player_id");
+      await sb.from("raid_deaths").delete().eq("raid_id",raidId);
+      if(deathRows.length){ const { error:de }=await sb.from("raid_deaths").insert(deathRows); if(de) throw new Error("raid_deaths: "+de.message); }
+
+      // loot for this night: match by date (single night takes all loot)
+      const lootForNight=lootAll.filter((l)=>{ if(single) return true;
+        const d=l.date?safeDate(l.date):null; return d?d.slice(0,10)===raidRow.raid_date:false; });
+      if(lootForNight.length){
+        const lootRows=lootForNight.map((l)=>{ const pid=idBy.get(l.player); if(!pid)return null;
+          return {raid_id:raidId,player_id:pid,item_name:l.item_name,item_id:l.item_id,source_boss:l.source_boss,response:l.response,won_at:l.date?safeDate(l.date):null}; }).filter(Boolean);
+        await up("loot_history",lootRows,"raid_id,player_id,item_id,source_boss,won_at");
+      }
+
+      await sb.from("imports").upsert([{file_hash:fp,file_name:staged.combatName,kind:"combatlog-night",raid_id:raidId}],{onConflict:"file_hash",ignoreDuplicates:true});
+      saved++;
     }
-    await up("attendance",att,"raid_id,player_id");
-    await up("preparedness",prep,"raid_id,player_id");
-    await up("performance",perf,"raid_id,player_id");
-    // deaths: replace this raid's rows (no natural key per death)
-    await sb.from("raid_deaths").delete().eq("raid_id",raidId);
-    if(deathRows.length){ const { error:de }=await sb.from("raid_deaths").insert(deathRows); if(de) throw new Error("raid_deaths: "+de.message); }
 
-    if(staged.loot?.loot?.length){
-      const lootRows=staged.loot.loot.map((l)=>{ const pid=idBy.get(l.player); if(!pid)return null;
-        return {raid_id:raidId,player_id:pid,item_name:l.item_name,item_id:l.item_id,source_boss:l.source_boss,response:l.response,won_at:l.date?safeDate(l.date):null}; }).filter(Boolean);
-      await up("loot_history",lootRows,"raid_id,player_id,item_id,source_boss,won_at");
-    }
-
-    // record import fingerprints
-    const imports=[{file_hash:combatHash,file_name:staged.combatName,kind:"combatlog",raid_id:raidId}];
-    if(staged.lootText) imports.push({file_hash:await hashText(staged.lootText),file_name:staged.lootName,kind:"rcloot",raid_id:raidId});
-    await sb.from("imports").upsert(imports,{onConflict:"file_hash",ignoreDuplicates:true});
-
-    setStatus("ss",`Saved raid #${raidId}.`,"ok");
+    const msg = saved
+      ? `Saved ${saved} raid night${saved===1?"":"s"}${skipped?`, skipped ${skipped} already imported`:""}.`
+      : `Nothing new — ${skipped} night${skipped===1?"":"s"} already imported.`;
+    setStatus("ss",msg,saved?"ok":"info");
     staged.combat=staged.loot=staged.combatText=staged.lootText=null;
-    setTimeout(()=>setView("home"),700);
+    if(saved) setTimeout(()=>setView("home"),800);
+    else btn.disabled=false;
   }catch(e){ setStatus("ss",`Save failed: ${e.message||e}`,"err"); btn.disabled=false; }
 }
 async function up(table,rowsArr,onConflict){ if(!rowsArr.length)return; const { error }=await sb.from(table).upsert(rowsArr,{onConflict}); if(error) throw new Error(`${table}: ${error.message}`); }

@@ -1,5 +1,7 @@
 // =====================================================================
 //  parsers.js — pure, browser-side parsing. No network, no DOM.
+//  parseCombatLog now splits a continuous log into separate raid nights
+//  (sessions separated by a long gap) and returns one result per night.
 // =====================================================================
 import {
   CONSUMABLE_PATTERNS, EXTRA_FLASK_IDS, EXTRA_ELIXIR_IDS,
@@ -12,7 +14,7 @@ function splitCsv(line){ const o=[]; let c="",q=false; for(let i=0;i<line.length
   if(ch==='"')q=!q; else if(ch===","&&!q){o.push(c);c="";} else c+=ch;} o.push(c); return o; }
 function parseTimestamp(ts){ const sp=ts.indexOf(" "); const dp=ts.slice(0,sp);
   let tp=ts.slice(sp+1).replace(/([+-]\d+)$/,""); const d=dp.split("/").map(Number);
-  const year=d.length>=3?d[2]:2024; const [hms,msRaw]=tp.split("."); const [h,m,s]=hms.split(":").map(Number);
+  const year=d.length>=3?d[2]:new Date().getFullYear(); const [hms,msRaw]=tp.split("."); const [h,m,s]=hms.split(":").map(Number);
   const ms=msRaw?Number(msRaw.padEnd(3,"0").slice(0,3)):0; return new Date(year,d[0]-1,d[1],h,m,s,ms).getTime(); }
 const DIFFICULTY_MAP={14:"Normal",15:"Heroic",16:"Mythic",17:"LFR",9:"25 Player",4:"25 Player"};
 
@@ -25,6 +27,12 @@ function buffCategory(name,spellId){ const n=name||"";
   if(CONSUMABLE_PATTERNS.elixir.test(n)||EXTRA_ELIXIR_IDS.has(spellId)) return "elixir";
   return null; }
 
+function zoneFromInstance(id){ const map={548:"Serpentshrine Cavern",550:"Tempest Keep",565:"Gruul's Lair",
+  544:"Magtheridon's Lair",532:"Karazhan",534:"Hyjal Summit",564:"Black Temple",580:"Sunwell Plateau"};
+  return map[id]||(id?`Instance ${id}`:"Unknown Zone"); }
+
+// ---------------------------------------------------------------------
+//  Returns { raids: [ {meta, players}, ... ] } — one entry per raid night.
 // ---------------------------------------------------------------------
 export function parseCombatLog(text){
   const lines=text.split(/\r?\n/);
@@ -32,34 +40,31 @@ export function parseCombatLog(text){
   const players=new Map();
   function player(name){ const key=stripRealm(name); if(!key) return null;
     if(!players.has(key)) players.set(key,{ name:key,
-      buffs:{flask:[],elixir:[],food:[]}, _open:{flask:null,elixir:null,food:null},
-      names:{flask:new Set(),elixir:new Set(),food:new Set()},
-      flaskApplications:0, potionCasts:[], deaths:[], recentDamage:[], seen:false });
+      buffs:{flask:[],elixir:[],food:[]}, _open:{flask:null,elixir:null,food:null}, _oname:{flask:null,elixir:null,food:null},
+      flaskAppliedTimes:[], potionCasts:[], deaths:[], recentDamage:[] });
     return players.get(key); }
-
-  let firstTs=null,lastTs=null,instanceId=null,difficulty=null;
 
   for(const raw of lines){
     if(!raw) continue;
     const sep=raw.indexOf("  "); if(sep===-1) continue;
-    const ts=parseTimestamp(raw.slice(0,sep)); if(firstTs===null) firstTs=ts; lastTs=ts;
+    const ts=parseTimestamp(raw.slice(0,sep));
     const f=splitCsv(raw.slice(sep+2)); const event=f[0];
 
     if(event==="ENCOUNTER_START"){ current={id:Number(f[1]),name:f[2].replace(/^"|"$/g,""),
-      difficulty:Number(f[3]),start:ts,end:null,success:false};
-      instanceId=Number(f[5]); difficulty=DIFFICULTY_MAP[Number(f[3])]||`Diff ${f[3]}`; continue; }
+      difficulty:Number(f[3]),instanceId:Number(f[5]),start:ts,end:null,success:false,participants:new Set()};
+      continue; }
     if(event==="ENCOUNTER_END"){ if(current){ current.end=ts; current.success=f[5]==="1";
       current.durationSec=(current.end-current.start)/1000; encounters.push(current); current=null; } continue; }
 
     const sGUID=f[1],sName=f[2];
-    if(isPlayerGUID(sGUID)){ const p=player(sName); if(p) p.seen=true; }
+    if(isPlayerGUID(sGUID)&&current){ const key=stripRealm(sName); if(key) current.participants.add(key); }
 
     if((event==="SPELL_AURA_APPLIED"||event==="SPELL_AURA_REFRESH"||event==="SPELL_AURA_REMOVED")&&isPlayerGUID(f[5])){
       const spellId=Number(f[9]); const name=f[10]; const cat=buffCategory(name,spellId);
       if(cat){ const p=player(f[6]); if(p){
-        if(event==="SPELL_AURA_REMOVED"){ if(p._open[cat]!==null){ p.buffs[cat].push({start:p._open[cat],end:ts}); p._open[cat]=null; } }
-        else { if(event==="SPELL_AURA_APPLIED"&&cat==="flask") p.flaskApplications++;
-               if(name) p.names[cat].add(name); if(p._open[cat]===null) p._open[cat]=ts; }
+        if(event==="SPELL_AURA_REMOVED"){ if(p._open[cat]!==null){ p.buffs[cat].push({start:p._open[cat],end:ts,name:p._oname[cat]}); p._open[cat]=null; } }
+        else { if(event==="SPELL_AURA_APPLIED"&&cat==="flask") p.flaskAppliedTimes.push(ts);
+               if(p._open[cat]===null){ p._open[cat]=ts; p._oname[cat]=name; } }
       }}
     }
 
@@ -80,60 +85,27 @@ export function parseCombatLog(text){
     }}
   }
 
-  const endTs=lastTs!==null?lastTs:0;
+  // close open buff intervals at the last encounter end we saw
+  const endTs=encounters.length?encounters[encounters.length-1].end:0;
   for(const p of players.values()) for(const cat of ["flask","elixir","food"])
-    if(p._open[cat]!==null){ p.buffs[cat].push({start:p._open[cat],end:Math.max(endTs,p._open[cat])}); p._open[cat]=null; }
+    if(p._open[cat]!==null){ p.buffs[cat].push({start:p._open[cat],end:Math.max(endTs,p._open[cat]),name:p._oname[cat]}); p._open[cat]=null; }
 
-  const totalBossMs=encounters.reduce((a,e)=>a+(e.end-e.start),0)||1;
-  const legitPulls=encounters.filter((e)=>e.durationSec>=SCORING.legitPullSeconds);
+  // ---- split encounters into raid-night sessions by a long gap ----
+  encounters.sort((a,b)=>a.start-b.start);
+  const gapMs=(SCORING.sessionGapHours||6)*3600000;
+  const sessions=[]; let cur=[];
+  for(const e of encounters){ if(cur.length&&e.start-cur[cur.length-1].end>gapMs){ sessions.push(cur); cur=[]; } cur.push(e); }
+  if(cur.length) sessions.push(cur);
 
-  const result=[];
-  for(const p of players.values()){
-    if(!p.seen&&p.deaths.length===0&&p.potionCasts.length===0) continue;
-    const uptime=(cat)=>{ let ms=0; for(const e of encounters) for(const iv of p.buffs[cat]) ms+=overlap(iv.start,iv.end,e.start,e.end);
-      return clamp((ms/totalBossMs)*100,0,100); };
-    const flaskU=uptime("flask"),elixirU=uptime("elixir"),foodU=uptime("food");
-    const coverage=Math.max(flaskU,elixirU);
-    let potionsEffective=0;
-    for(const ts of p.potionCasts){ const e=encounterAt(encounters,ts); if(e&&e.durationSec>=SCORING.legitPullSeconds) potionsEffective++; }
-    const potionsUsed=p.potionCasts.length;
-    const consumableEfficiency=potionsUsed>0?(potionsEffective/potionsUsed)*100:0;
-    // Potion component: did they use a combat potion during boss fights at all?
-    // Yes (>=1 effective) = full marks; No = 0. Not per-pull.
-    const potionScore = potionsEffective >= 1 ? 100 : 0;
-    const preparednessScore=SCORING.coverageWeight*coverage+SCORING.foodWeight*foodU+SCORING.potionWeight*potionScore;
-    const avoidable=p.deaths.filter((d)=>d.avoidable).length;
-    const unavoidable=p.deaths.length-avoidable;
-    const deathCostIndex=avoidable*SCORING.avoidableDeathWeight+unavoidable*SCORING.unavoidableDeathWeight;
-
-    result.push({ name:p.name, status:"present",
-      flasks_used:p.flaskApplications,
-      flask_uptime_pct:round1(flaskU), elixir_uptime_pct:round1(elixirU), food_uptime_pct:round1(foodU),
-      coverage_pct:round1(coverage),
-      flask_name:[...p.names.flask][0]||null,
-      elixir_names:[...p.names.elixir].join(", ")||null,
-      food_name:[...p.names.food][0]||null,
-      potions_used:potionsUsed, potions_effective:potionsEffective,
-      consumable_efficiency:round1(consumableEfficiency),
-      potion_score:round1(potionScore), legit_pulls:legitPulls.length,
-      preparedness_score:round1(preparednessScore),
-      avoidable_deaths:avoidable, unavoidable_deaths:unavoidable, death_cost_index:round2(deathCostIndex),
-      deaths_detail:p.deaths.map((d)=>({boss:d.boss,avoidable:d.avoidable,cause:d.cause})),
-    });
-  }
-
-  const meta={ raidDate:firstTs?isoDate(firstTs):isoDate(Date.now()), instanceId,
-    difficulty:difficulty||"Unknown", zoneNameGuess:zoneFromInstance(instanceId),
-    encounters:encounters.map((e)=>({id:e.id,name:e.name,durationSec:round1(e.durationSec),success:e.success})) };
-  return { meta, players:result };
+  const raids=sessions.map((encs)=>buildNight(encs,players));
+  return { raids };
 
   function classifyDeath(p,ts,encounterId){
     const recent=p.recentDamage.filter((d)=>ts-d.ts<=6000&&d.hostile);
     const set=AVOIDABLE_SPELL_IDS[encounterId];
     if(set&&set.size){ const hit=recent.find((d)=>d.kind==="spell"&&set.has(d.spellId));
       if(hit) return {avoidable:true,cause:hit.spellName};
-      const last0=recent[recent.length-1];
-      return {avoidable:false,cause:last0?last0.spellName:"Unknown"}; }
+      const last0=recent[recent.length-1]; return {avoidable:false,cause:last0?last0.spellName:"Unknown"}; }
     if(recent.length===0) return {avoidable:false,cause:"Unknown"};
     const last=recent[recent.length-1];
     if(last.kind==="env") return {avoidable:true,cause:`Environmental (${last.spellName})`};
@@ -142,9 +114,57 @@ export function parseCombatLog(text){
   }
 }
 
-function zoneFromInstance(id){ const map={548:"Serpentshrine Cavern",550:"Tempest Keep",565:"Gruul's Lair",
-  544:"Magtheridon's Lair",532:"Karazhan",534:"Hyjal Summit",564:"Black Temple",580:"Sunwell Plateau"};
-  return map[id]||(id?`Instance ${id}`:"Unknown Zone"); }
+// build one night's {meta, players} from its encounters + the global player map
+function buildNight(encs,players){
+  const winStart=encs[0].start, winEnd=encs[encs.length-1].end, prepStart=winStart-3600000;
+  const totalBossMs=encs.reduce((a,e)=>a+(e.end-e.start),0)||1;
+  const legitPulls=encs.filter((e)=>e.durationSec>=SCORING.legitPullSeconds);
+  const present=new Set(); for(const e of encs) for(const nm of e.participants) present.add(nm);
+  const encAt=(ts)=>encs.find((e)=>ts>=e.start&&ts<=e.end)||null;
+
+  const out=[];
+  for(const p of players.values()){
+    const deathsWin=p.deaths.filter((d)=>d.ts>=prepStart&&d.ts<=winEnd);
+    if(!present.has(p.name)&&deathsWin.length===0) continue;
+
+    const uptime=(cat)=>{ let ms=0; const names=new Set();
+      for(const e of encs) for(const iv of p.buffs[cat]){ const o=overlap(iv.start,iv.end,e.start,e.end); if(o>0){ ms+=o; if(iv.name) names.add(iv.name); } }
+      return { pct:clamp((ms/totalBossMs)*100,0,100), names:[...names] }; };
+    const fU=uptime("flask"), eU=uptime("elixir"), foU=uptime("food");
+    const coverage=Math.max(fU.pct,eU.pct);
+
+    const casts=p.potionCasts.filter((ts)=>ts>=prepStart&&ts<=winEnd);
+    let potionsEffective=0; for(const ts of casts){ const e=encAt(ts); if(e&&e.durationSec>=SCORING.legitPullSeconds) potionsEffective++; }
+    const potionsUsed=casts.length;
+    const consumableEfficiency=potionsUsed>0?(potionsEffective/potionsUsed)*100:0;
+    const potionScore=potionsEffective>=1?100:0;
+    const preparednessScore=SCORING.coverageWeight*coverage+SCORING.foodWeight*foU.pct+SCORING.potionWeight*potionScore;
+
+    const flasksUsed=p.flaskAppliedTimes.filter((ts)=>ts>=prepStart&&ts<=winEnd).length;
+    const avoidable=deathsWin.filter((d)=>d.avoidable).length;
+    const unavoidable=deathsWin.length-avoidable;
+    const dci=avoidable*SCORING.avoidableDeathWeight+unavoidable*SCORING.unavoidableDeathWeight;
+
+    out.push({ name:p.name, status:"present",
+      flasks_used:flasksUsed,
+      flask_uptime_pct:round1(fU.pct), elixir_uptime_pct:round1(eU.pct), food_uptime_pct:round1(foU.pct),
+      coverage_pct:round1(coverage),
+      flask_name:fU.names[0]||null, elixir_names:eU.names.join(", ")||null, food_name:foU.names[0]||null,
+      potions_used:potionsUsed, potions_effective:potionsEffective,
+      consumable_efficiency:round1(consumableEfficiency), potion_score:round1(potionScore), legit_pulls:legitPulls.length,
+      preparedness_score:round1(preparednessScore),
+      avoidable_deaths:avoidable, unavoidable_deaths:unavoidable, death_cost_index:round2(dci),
+      deaths_detail:deathsWin.map((d)=>({boss:d.boss,avoidable:d.avoidable,cause:d.cause})),
+    });
+  }
+
+  const insts=[...new Set(encs.map((e)=>e.instanceId))];
+  const meta={ raidDate:isoDate(winStart), instanceId:insts[0]||null,
+    difficulty:DIFFICULTY_MAP[encs[0].difficulty]||`Diff ${encs[0].difficulty}`,
+    zoneNameGuess:insts.map(zoneFromInstance).join(" + "),
+    encounters:encs.map((e)=>({id:e.id,name:e.name,durationSec:round1(e.durationSec),success:e.success})) };
+  return { meta, players:out };
+}
 
 // -------------------- RCLootCouncil parser (unchanged) --------------------
 export function parseRCLootCouncil(text){
@@ -188,7 +208,6 @@ function extractItemId(s){ const m=String(s).match(/item[:\-]?(\d+)/i)||String(s
 function extractItemName(s){ const m=String(s).match(/\[([^\]]+)\]/); if(m) return m[1];
   return String(s).replace(/\|c[0-9a-f]{8}|\|r|\|H[^|]*\|h|\|h/gi,"").trim()||null; }
 function overlap(a1,a2,b1,b2){ return Math.max(0,Math.min(a2,b2)-Math.max(a1,b1)); }
-function encounterAt(encs,ts){ return encs.find((e)=>ts>=e.start&&ts<=e.end)||null; }
 function clamp(x,lo,hi){ return Math.min(hi,Math.max(lo,x)); }
 function round1(x){ return Math.round(x*10)/10; }
 function round2(x){ return Math.round(x*100)/100; }
