@@ -194,11 +194,12 @@ let ppTrend=[]; // closure data for the switchable chart
 const TREND_METRICS={preparedness_score:"Preparedness",coverage_pct:"Flask/elixir coverage",flask_uptime_pct:"Flask uptime",food_uptime_pct:"Food uptime",consumable_efficiency:"Potion efficiency"};
 
 async function renderPlayerProfile(pid){
-  const [rankArr, prep, deaths, loot] = await Promise.all([
+  const [rankArr, prep, deaths, loot, cevents] = await Promise.all([
     sb.from("player_rankings").select("*").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("preparedness").select("raid_id,preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,potion_score,legit_pulls,potions_used,potions_effective,flask_name,elixir_names,food_name,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("raid_deaths").select("boss_name,cause,avoidable,raids(raid_date)").eq("player_id",pid).then(r=>r.data||[]),
     sb.from("loot_history").select("item_name,source_boss,response,won_at,raids(raid_date)").eq("player_id",pid).order("won_at",{ascending:false}).then(r=>r.data||[]),
+    sb.from("consumable_events").select("raid_id,event_time,kind,name,boss_name").eq("player_id",pid).order("event_time",{ascending:true}).then(r=>r.data||[]),
   ]);
   const p=rankArr[0];
   if(!p){ root().innerHTML=`<div class="card"><div class="empty">Player not found.</div></div>`; return; }
@@ -247,8 +248,8 @@ async function renderPlayerProfile(pid){
     </div>
     <div class="tablewrap"><table>
       <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort" title="Boss pulls where a combat potion was used (covered / total)">Potions</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
-      <tbody>${byDate.map((r)=>`<tr>
-        <td>${fmtDate(r.raids?.raid_date)}</td>
+      <tbody>${byDate.map((r)=>`<tr class="clickable" data-raidrow="${r.raid_id}" title="Click for the consumable timeline">
+        <td>${fmtDate(r.raids?.raid_date)} 🔍</td>
         <td class="num">${pct(r.coverage_pct)}</td>
         <td class="num">${pct(r.flask_uptime_pct)}</td>
         <td class="num">${pct(r.elixir_uptime_pct)}</td>
@@ -301,6 +302,30 @@ async function renderPlayerProfile(pid){
   const redraw=(key)=>{ killCharts(); drawTrend("pp-chart", ppTrend.map((r)=>r.raids?.raid_date), ppTrend.map((r)=>r[key]), TREND_METRICS[key], true); };
   $("trend-metric").addEventListener("change",(e)=>redraw(e.target.value));
   redraw("preparedness_score");
+
+  // click a per-raid row -> consumable timeline popup
+  const ceByRaid=new Map();
+  for(const ev of cevents){ if(!ceByRaid.has(ev.raid_id)) ceByRaid.set(ev.raid_id,[]); ceByRaid.get(ev.raid_id).push(ev); }
+  root().querySelectorAll("tr[data-raidrow]").forEach((tr)=>tr.addEventListener("click",()=>{
+    const rid=Number(tr.dataset.raidrow);
+    const row=byDate.find((r)=>r.raid_id===rid);
+    const evs=(ceByRaid.get(rid)||[]).sort((a,b)=>new Date(a.event_time)-new Date(b.event_time));
+    const KTAG={potion:"warn",food:"good",flask:"neutral",elixir:"neutral"};
+    const body=`<div class="sub" style="margin-bottom:.6rem">${esc(p.name)} — everything they flasked, ate, and drank that night, in order.</div>
+      <div class="tablewrap"><table><thead><tr><th class="no-sort">Time</th><th class="no-sort">Type</th><th class="no-sort">Consumable</th><th class="no-sort">During</th></tr></thead>
+      <tbody>${evs.map((e)=>`<tr><td class="num">${new Date(e.event_time).toLocaleTimeString()}</td><td><span class="tag ${KTAG[e.kind]||"neutral"}">${esc(e.kind)}</span></td><td>${esc(e.name||"")}</td><td>${esc(e.boss_name||"— (between pulls)")}</td></tr>`).join("")||`<tr><td colspan="4"><div class="empty">No consumable events recorded for this raid.</div></td></tr>`}</tbody></table></div>`;
+    openModal(`Consumables — ${fmtDate(row?.raids?.raid_date)}`, body);
+  }));
+}
+
+function openModal(title, html){
+  let ov=document.getElementById("modal-ov");
+  if(!ov){ ov=document.createElement("div"); ov.id="modal-ov";
+    ov.style.cssText="position:fixed;inset:0;background:rgba(20,25,45,.45);display:grid;place-items:center;z-index:100;padding:1rem";
+    document.body.appendChild(ov); ov.addEventListener("click",(e)=>{ if(e.target===ov) ov.remove(); }); }
+  ov.innerHTML=`<div style="background:var(--surface);border-radius:14px;max-width:600px;width:100%;max-height:82vh;overflow:auto;box-shadow:var(--shadow-lg);padding:1.25rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem"><h2 style="font-size:1.05rem">${title}</h2><button class="btn ghost sm" id="modal-x">Close</button></div>${html}</div>`;
+  document.getElementById("modal-x").addEventListener("click",()=>ov.remove());
 }
 
 // ---------------------------------------------------------------- RAIDS
@@ -552,6 +577,13 @@ async function saveRaid(){
       await up("performance",perf,"raid_id,player_id");
       await sb.from("raid_deaths").delete().eq("raid_id",raidId);
       if(deathRows.length){ const { error:de }=await sb.from("raid_deaths").insert(deathRows); if(de) throw new Error("raid_deaths: "+de.message); }
+
+      // consumable timeline (evidence trail)
+      const ceRows=[];
+      for(const p of night.players){ const pid=idBy.get(p.name); if(!pid)continue;
+        for(const ev of (p.events||[])) ceRows.push({raid_id:raidId,player_id:pid,event_time:ev.time,kind:ev.kind,name:ev.name,boss_name:ev.boss}); }
+      await sb.from("consumable_events").delete().eq("raid_id",raidId);
+      for(let i=0;i<ceRows.length;i+=500){ const { error:ce }=await sb.from("consumable_events").insert(ceRows.slice(i,i+500)); if(ce) throw new Error("consumable_events: "+ce.message); }
 
       // loot for this night: match by date (single night takes all loot)
       const lootForNight=lootAll.filter((l)=>{ if(single) return true;

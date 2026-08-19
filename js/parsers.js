@@ -41,7 +41,7 @@ export function parseCombatLog(text){
   function player(name){ const key=stripRealm(name); if(!key) return null;
     if(!players.has(key)) players.set(key,{ name:key,
       buffs:{flask:[],elixir:[],food:[]}, _open:{flask:null,elixir:null,food:null}, _oname:{flask:null,elixir:null,food:null},
-      flaskAppliedTimes:[], potionCasts:[], deaths:[], recentDamage:[] });
+      flaskAppliedTimes:[], potionCasts:[], deaths:[], recentDamage:[], events:[] });
     return players.get(key); }
 
   for(const raw of lines){
@@ -63,12 +63,12 @@ export function parseCombatLog(text){
       const spellId=Number(f[9]); const name=f[10]; const cat=buffCategory(name,spellId);
       if(cat){ const p=player(f[6]); if(p){
         if(event==="SPELL_AURA_REMOVED"){ if(p._open[cat]!==null){ p.buffs[cat].push({start:p._open[cat],end:ts,name:p._oname[cat]}); p._open[cat]=null; } }
-        else { if(event==="SPELL_AURA_APPLIED"&&cat==="flask") p.flaskAppliedTimes.push(ts);
+        else { if(event==="SPELL_AURA_APPLIED"){ if(cat==="flask") p.flaskAppliedTimes.push(ts); p.events.push({ts,kind:cat,name}); }
                if(p._open[cat]===null){ p._open[cat]=ts; p._oname[cat]=name; } }
       }}
     }
 
-    if(event==="SPELL_CAST_SUCCESS"&&isPlayerGUID(sGUID)){ if(POTION_SPELL_IDS.has(Number(f[9]))){ const p=player(sName); if(p) p.potionCasts.push(ts); } }
+    if(event==="SPELL_CAST_SUCCESS"&&isPlayerGUID(sGUID)){ if(POTION_SPELL_IDS.has(Number(f[9]))){ const p=player(sName); if(p){ const nm=f[10]||"Potion"; p.potionCasts.push({ts,name:nm}); p.events.push({ts,kind:"potion",name:nm}); } } }
 
     if(event.endsWith("_DAMAGE")&&isPlayerGUID(f[5])){ const p=player(f[6]); if(p){
       let kind="spell",spellId=0,spellName="";
@@ -133,9 +133,9 @@ function buildNight(encs,players){
     const fU=uptime("flask"), eU=uptime("elixir"), foU=uptime("food");
     const coverage=Math.max(fU.pct,eU.pct);
 
-    const casts=p.potionCasts.filter((ts)=>ts>=prepStart&&ts<=winEnd);
+    const casts=p.potionCasts.filter((c)=>c.ts>=prepStart&&c.ts<=winEnd);
     let potionsEffective=0; const pullsWithPotion=new Set();
-    for(const ts of casts){ const e=encAt(ts); if(e&&e.durationSec>=SCORING.legitPullSeconds){ potionsEffective++; pullsWithPotion.add(e.start); } }
+    for(const c of casts){ const e=encAt(c.ts); if(e&&e.durationSec>=SCORING.legitPullSeconds){ potionsEffective++; pullsWithPotion.add(e.start); } }
     const potionsUsed=casts.length;
     const consumableEfficiency=potionsUsed>0?(potionsEffective/potionsUsed)*100:0;
     // Potion component = on how many of the night's boss pulls did they use a
@@ -159,6 +159,8 @@ function buildNight(encs,players){
       preparedness_score:round1(preparednessScore),
       avoidable_deaths:avoidable, unavoidable_deaths:unavoidable, death_cost_index:round2(dci),
       deaths_detail:deathsWin.map((d)=>({boss:d.boss,avoidable:d.avoidable,cause:d.cause})),
+      events:p.events.filter((e)=>e.ts>=prepStart&&e.ts<=winEnd).sort((a,b)=>a.ts-b.ts)
+        .map((e)=>({time:new Date(e.ts).toISOString(),kind:e.kind,name:e.name,boss:(encAt(e.ts)?encAt(e.ts).name:null)})),
     });
   }
 
