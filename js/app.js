@@ -1,397 +1,451 @@
 // =====================================================================
-//  app.js — glue between the browser, the parsers, and Supabase.
-//  Handles: auth, drag & drop, DB upserts, dashboard rendering.
+//  app.js — router + views + Supabase integration
 // =====================================================================
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { parseCombatLog, parseRCLootCouncil } from "./parsers.js";
+import { parseCombatLog, parseRCLootCouncil, hashText } from "./parsers.js";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// hold parsed-but-not-yet-saved results between drops
-const staged = { combat: null, loot: null };
-
-// ---------------------------------------------------------------------
-//  AUTH
-// ---------------------------------------------------------------------
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const $ = (id) => document.getElementById(id);
+const root = () => $("view-root");
 
-async function refreshAuthUI() {
-  const { data } = await supabase.auth.getSession();
-  const session = data.session;
-  const signedIn = !!session;
-  $("auth-view").hidden = signedIn;
-  $("app-view").hidden = !signedIn;
-  if (signedIn) {
-    $("who").textContent = session.user.email;
-    // confirm officer status — RLS will also enforce this, but we can
-    // give a friendlier message up front.
-    const { count } = await supabase
-      .from("officers")
-      .select("user_id", { count: "exact", head: true });
-    if (count === 0) {
-      $("officer-warning").hidden = false;
-    }
-    loadDashboard();
-  }
+const CLASS_COLORS = {
+  Warrior:"#C69B6D",Paladin:"#F48CBA",Hunter:"#AAD372",Rogue:"#FFF468",
+  Priest:"#E9ECF2",Shaman:"#0070DD",Mage:"#3FC7EB",Warlock:"#8788EE",Druid:"#FF7C0A",
+};
+const classColor = (c) => CLASS_COLORS[c] || "#b7becb";
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pname = (name,cls) => `<span class="pname"><span class="pill-dot" style="background:${classColor(cls)}"></span>${esc(name)}${cls?` <span class="cls">${esc(cls)}</span>`:""}</span>`;
+const meterColor = (v) => v>=80?"var(--good)":v>=50?"var(--warn)":"var(--bad)";
+const meter = (v) => `<div class="metric-cell"><div class="meter"><span style="width:${Math.max(0,Math.min(100,v))}%;background:${meterColor(v)}"></span></div><span class="num">${v}</span></div>`;
+const fmtDate = (d) => d ? new Date(d).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}) : "—";
+
+let charts = [];
+const killCharts = () => { charts.forEach((c)=>c.destroy()); charts = []; };
+
+// ---------------------------------------------------------------- auth
+async function refreshAuth(){
+  const { data } = await sb.auth.getSession();
+  const signed = !!data.session;
+  $("auth").hidden = signed; $("app").hidden = !signed;
+  if (signed){ $("who").textContent = data.session.user.email; setView(currentView); }
+}
+$("sign-in").addEventListener("click", async ()=>{
+  $("auth-error").textContent="";
+  const { error } = await sb.auth.signInWithPassword({ email:$("email").value.trim(), password:$("password").value });
+  if (error) $("auth-error").textContent = error.message; else refreshAuth();
+});
+$("sign-out").addEventListener("click", async ()=>{ await sb.auth.signOut(); refreshAuth(); });
+sb.auth.onAuthStateChange(()=>refreshAuth());
+
+// --------------------------------------------------------------- router
+let currentView = "home";
+$("tabs").addEventListener("click",(e)=>{ const b=e.target.closest("button[data-view]"); if(b) setView(b.dataset.view); });
+function setTab(v){ [...$("tabs").children].forEach((b)=>b.classList.toggle("active",b.dataset.view===v)); }
+async function setView(v, arg){
+  currentView = v; setTab(v); killCharts();
+  root().innerHTML = `<div class="spin">Loading…</div>`;
+  try{
+    if (v==="home") await renderHome();
+    else if (v==="players") await renderPlayers();
+    else if (v==="player") await renderPlayerProfile(arg);
+    else if (v==="raids") await renderRaids();
+    else if (v==="raid") await renderRaidDetail(arg);
+    else if (v==="loot") await renderLoot();
+    else if (v==="upload") await renderUpload();
+  }catch(err){ root().innerHTML = `<div class="card"><div class="empty">Couldn't load this view.<br><small>${esc(err.message||err)}</small></div></div>`; }
 }
 
-$("sign-in").addEventListener("click", async () => {
-  $("auth-error").textContent = "";
-  const { error } = await supabase.auth.signInWithPassword({
-    email: $("email").value.trim(),
-    password: $("password").value,
-  });
-  if (error) $("auth-error").textContent = error.message;
-  else refreshAuthUI();
-});
+// -------------------------------------------------------------- fetchers
+const q = (t,sel="*") => sb.from(t).select(sel);
+async function rows(t,sel="*"){ const { data,error } = await q(t,sel); if(error) throw error; return data||[]; }
 
-$("sign-out").addEventListener("click", async () => {
-  await supabase.auth.signOut();
-  refreshAuthUI();
-});
+// ---------------------------------------------------------------- HOME
+async function renderHome(){
+  const [rank, prio, byRaid] = await Promise.all([
+    rows("player_rankings"), rows("loot_priority"), rows("attendance_by_raid"),
+  ]);
+  const raids = byRaid.length;
+  const avgAtt = raids ? Math.round(byRaid.reduce((a,r)=>a+(r.roster_count?100*r.present_count/r.roster_count:0),0)/raids) : 0;
+  const totalLoot = rank.reduce((a,r)=>a+r.items_won,0);
 
-// ---------------------------------------------------------------------
-//  DRAG & DROP
-// ---------------------------------------------------------------------
-function wireDropZone(zoneId, onText) {
-  const zone = $(zoneId);
-  const input = zone.querySelector('input[type="file"]');
+  const priority = [...prio].sort((a,b)=>b.loot_priority_score-a.loot_priority_score).slice(0,8);
+  const regulars = [...rank].sort((a,b)=>b.attendance_pct-a.attendance_pct||b.raids_attended-a.raids_attended).slice(0,6);
+  const watch = rank.filter((r)=> r.avg_coverage<50 || r.avg_food<50 || (r.avg_consumable_efficiency<60 && r.avg_consumable_efficiency>0))
+    .sort((a,b)=>a.avg_preparedness-b.avg_preparedness).slice(0,6);
 
-  const readFile = (file) => {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => onText(file.name, reader.result);
-    reader.readAsText(file);
+  const lootTag = (s)=> s>=40?`<span class="tag good">owed loot</span>`:s>=15?`<span class="tag neutral">balanced</span>`:`<span class="tag warn">well rewarded</span>`;
+
+  root().innerHTML = `
+  <div class="grid-stats">
+    <div class="stat"><div class="label">Raids logged</div><div class="value num">${raids}</div></div>
+    <div class="stat"><div class="label">Avg attendance</div><div class="value num">${avgAtt}%</div></div>
+    <div class="stat"><div class="label">Roster tracked</div><div class="value num">${rank.length}</div></div>
+    <div class="stat"><div class="label">Items awarded</div><div class="value num">${totalLoot}</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Loot priority</h2>
+    <div class="sub">Contribution (attendance × preparedness, minus avoidable deaths) versus loot already won. A starting point for council — highest = most owed.</div>
+    <div class="plist">
+      ${priority.map((p)=>`
+        <div class="prow clickable" data-pid="${p.player_id}">
+          <div class="rank num"></div>
+          <div class="pmeta">
+            ${pname(p.name,p.class)}
+            <div class="pwhy">Attendance ${p.attendance_pct}% · Prep ${p.avg_preparedness} · ${p.avoidable_deaths} avoidable death${p.avoidable_deaths===1?"":"s"} · ${p.items_won} item${p.items_won===1?"":"s"} won</div>
+          </div>
+          ${lootTag(p.loot_priority_score)}
+          <div class="pscore num">${p.loot_priority_score}</div>
+        </div>`).join("") || `<div class="empty">No data yet — upload a raid.</div>`}
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2>Most reliable</h2>
+      <div class="sub">Who genuinely shows up.</div>
+      <div class="plist">
+        ${regulars.map((p)=>`
+          <div class="prow clickable" data-pid="${p.player_id}">
+            <div class="pmeta">${pname(p.name,p.class)}
+              <div class="pwhy">${p.raids_attended}/${p.raids_recorded} raids · last seen ${fmtDate(p.last_seen)}</div></div>
+            <div class="pscore num">${p.attendance_pct}%</div>
+          </div>`).join("") || `<div class="empty">—</div>`}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Preparedness watch</h2>
+      <div class="sub">No flask/elixir, missing food, or wasted potions.</div>
+      <div class="plist">
+        ${watch.map((p)=>{
+          const flags=[]; if(p.avg_coverage<50)flags.push("no flask/elixir"); if(p.avg_food<50)flags.push("no food"); if(p.avg_consumable_efficiency<60&&p.avg_consumable_efficiency>0)flags.push("wasted potions");
+          return `<div class="prow clickable" data-pid="${p.player_id}">
+            <div class="pmeta">${pname(p.name,p.class)}<div class="pwhy">${flags.join(" · ")}</div></div>
+            <span class="tag warn">prep ${p.avg_preparedness}</span></div>`;
+        }).join("") || `<div class="empty">Everyone's prepared 🎉</div>`}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Attendance over time</h2>
+    <div class="sub">Players present per raid night.</div>
+    <canvas id="att-chart" height="80"></canvas>
+  </div>`;
+
+  root().querySelectorAll("[data-pid]").forEach((el)=>el.addEventListener("click",()=>setView("player",Number(el.dataset.pid))));
+  root().querySelectorAll(".prow .rank").forEach((el,i)=>el.textContent=i+1);
+  drawTrend("att-chart", byRaid.map((r)=>r.raid_date), byRaid.map((r)=>r.present_count), "Present");
+}
+
+// -------------------------------------------------------------- PLAYERS
+let playersData=[], playersSort={key:"avg_preparedness",dir:-1};
+async function renderPlayers(){
+  playersData = await rows("player_rankings");
+  root().innerHTML = `
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:.6rem;flex-wrap:wrap">
+      <div><h2>Players</h2><div class="sub" style="margin:0">Click a name for their full history.</div></div>
+      <input id="psearch" placeholder="Search player…" style="max-width:260px" />
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th class="no-sort">Player</th>
+        <th class="num" data-k="attendance_pct">Attend.</th>
+        <th data-k="avg_preparedness">Prepared</th>
+        <th class="num" data-k="avg_consumable_efficiency">Pot. eff.</th>
+        <th class="num" data-k="avoidable_deaths">Avoid.</th>
+        <th class="num" data-k="unavoidable_deaths">Unavoid.</th>
+        <th class="num" data-k="death_cost_index">DCI</th>
+        <th class="num" data-k="items_won">Items</th>
+      </tr></thead>
+      <tbody id="pbody"></tbody>
+    </table></div>
+  </div>`;
+  const draw=()=>{
+    const term=($("psearch").value||"").toLowerCase();
+    const list=playersData.filter((p)=>p.name.toLowerCase().includes(term))
+      .sort((a,b)=>(a[playersSort.key]-b[playersSort.key])*playersSort.dir||a.name.localeCompare(b.name));
+    $("pbody").innerHTML=list.map((p)=>`
+      <tr class="clickable" data-pid="${p.player_id}">
+        <td>${pname(p.name,p.class)}</td>
+        <td class="num">${p.attendance_pct}%</td>
+        <td>${meter(p.avg_preparedness)}</td>
+        <td class="num">${p.avg_consumable_efficiency}%</td>
+        <td class="num">${p.avoidable_deaths}</td>
+        <td class="num">${p.unavoidable_deaths}</td>
+        <td class="num" style="color:${p.death_cost_index>3?"var(--bad-ink)":"inherit"}">${p.death_cost_index}</td>
+        <td class="num">${p.items_won}</td>
+      </tr>`).join("") || `<tr><td colspan="8"><div class="empty">No players match.</div></td></tr>`;
+    $("pbody").querySelectorAll("[data-pid]").forEach((el)=>el.addEventListener("click",()=>setView("player",Number(el.dataset.pid))));
   };
-
-  ["dragenter", "dragover"].forEach((ev) =>
-    zone.addEventListener(ev, (e) => {
-      e.preventDefault();
-      zone.classList.add("drag");
-    })
-  );
-  ["dragleave", "drop"].forEach((ev) =>
-    zone.addEventListener(ev, (e) => {
-      e.preventDefault();
-      zone.classList.remove("drag");
-    })
-  );
-  zone.addEventListener("drop", (e) => readFile(e.dataTransfer.files[0]));
-  zone.addEventListener("click", () => input.click());
-  input.addEventListener("change", (e) => readFile(e.target.files[0]));
-}
-
-wireDropZone("drop-combat", (name, text) => {
-  try {
-    staged.combat = parseCombatLog(text);
-    const m = staged.combat.meta;
-    $("combat-status").textContent =
-      `✓ ${name}: ${staged.combat.players.length} players, ` +
-      `${m.encounters.length} encounters, ${m.difficulty}, ${m.raidDate}`;
-    // prefill the raid form from the log
-    $("raid-date").value = m.raidDate;
-    if (!$("raid-zone").value) $("raid-zone").value = m.zoneNameGuess;
-    $("raid-difficulty").value = m.difficulty;
-    $("save-btn").disabled = false;
-  } catch (err) {
-    $("combat-status").textContent = `Couldn't parse that log: ${err.message}`;
-  }
-});
-
-wireDropZone("drop-loot", (name, text) => {
-  try {
-    staged.loot = parseRCLootCouncil(text);
-    $("loot-status").textContent =
-      `✓ ${name}: ${staged.loot.loot.length} loot awards, ` +
-      `${staged.loot.players.length} players`;
-  } catch (err) {
-    $("loot-status").textContent = `Couldn't parse that export: ${err.message}`;
-  }
-});
-
-// ---------------------------------------------------------------------
-//  SAVE TO SUPABASE
-//  Order: players -> raid -> attendance/preparedness/performance -> loot
-//  Every write is an upsert on a natural key, so re-uploading a night
-//  corrects the numbers instead of duplicating rows.
-// ---------------------------------------------------------------------
-$("save-btn").addEventListener("click", async () => {
-  const btn = $("save-btn");
-  btn.disabled = true;
-  setSaveStatus("Saving…");
-
-  try {
-    if (!staged.combat) throw new Error("Drop a combat log first.");
-
-    // 1) Collect every player name we know about (log + loot) and upsert.
-    const classByName = new Map();
-    (staged.loot?.players || []).forEach((p) =>
-      classByName.set(p.name, p.class)
-    );
-    const names = new Set(staged.combat.players.map((p) => p.name));
-    (staged.loot?.loot || []).forEach((l) => names.add(l.player));
-
-    const playerRows = [...names].map((name) => ({
-      name,
-      class: classByName.get(name) || null,
-    }));
-    const { error: pErr } = await supabase
-      .from("players")
-      .upsert(playerRows, { onConflict: "name", ignoreDuplicates: false });
-    if (pErr) throw pErr;
-
-    // map name -> id
-    const { data: playerData, error: pSelErr } = await supabase
-      .from("players")
-      .select("id, name")
-      .in("name", [...names]);
-    if (pSelErr) throw pSelErr;
-    const idByName = new Map(playerData.map((p) => [p.name, p.id]));
-
-    // 2) Upsert the raid, get its id.
-    const raidRow = {
-      raid_date: $("raid-date").value,
-      zone_name: $("raid-zone").value || staged.combat.meta.zoneNameGuess,
-      difficulty: $("raid-difficulty").value || staged.combat.meta.difficulty,
-    };
-    const { data: raidData, error: rErr } = await supabase
-      .from("raids")
-      .upsert(raidRow, {
-        onConflict: "raid_date,zone_name,difficulty",
-        ignoreDuplicates: false,
-      })
-      .select("id")
-      .single();
-    if (rErr) throw rErr;
-    const raidId = raidData.id;
-
-    // 3) Per-player fact rows.
-    const attendance = [];
-    const preparedness = [];
-    const performance = [];
-    for (const p of staged.combat.players) {
-      const pid = idByName.get(p.name);
-      if (!pid) continue;
-      attendance.push({ raid_id: raidId, player_id: pid, status: p.status });
-      preparedness.push({
-        raid_id: raidId,
-        player_id: pid,
-        flasks_used: p.flasks_used,
-        flask_uptime_pct: p.flask_uptime_pct,
-        potions_used: p.potions_used,
-        potions_effective: p.potions_effective,
-        consumable_efficiency: p.consumable_efficiency,
-        preparedness_score: p.preparedness_score,
-      });
-      performance.push({
-        raid_id: raidId,
-        player_id: pid,
-        avoidable_deaths: p.avoidable_deaths,
-        unavoidable_deaths: p.unavoidable_deaths,
-        death_cost_index: p.death_cost_index,
-      });
-    }
-
-    await upsertOrThrow("attendance", attendance, "raid_id,player_id");
-    await upsertOrThrow("preparedness", preparedness, "raid_id,player_id");
-    await upsertOrThrow("performance", performance, "raid_id,player_id");
-
-    // 4) Loot rows (idempotent on the natural key from the schema).
-    if (staged.loot?.loot?.length) {
-      const lootRows = staged.loot.loot
-        .map((l) => {
-          const pid = idByName.get(l.player);
-          if (!pid) return null;
-          return {
-            raid_id: raidId,
-            player_id: pid,
-            item_name: l.item_name,
-            item_id: l.item_id,
-            source_boss: l.source_boss,
-            response: l.response,
-            won_at: l.date ? safeDate(l.date) : null,
-          };
-        })
-        .filter(Boolean);
-      await upsertOrThrow(
-        "loot_history",
-        lootRows,
-        "raid_id,player_id,item_id,source_boss,won_at"
-      );
-    }
-
-    setSaveStatus(`Saved raid #${raidId}.`, "ok");
-    staged.combat = null;
-    staged.loot = null;
-    $("combat-status").textContent = "";
-    $("loot-status").textContent = "";
-    loadDashboard();
-  } catch (err) {
-    setSaveStatus(`Save failed: ${err.message || err}`, "err");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-async function upsertOrThrow(table, rows, onConflict) {
-  if (!rows.length) return;
-  const { error } = await supabase
-    .from(table)
-    .upsert(rows, { onConflict, ignoreDuplicates: false });
-  if (error) throw new Error(`${table}: ${error.message}`);
-}
-
-function setSaveStatus(msg, kind = "") {
-  const el = $("save-status");
-  el.textContent = msg;
-  el.className = kind;
-}
-
-function safeDate(s) {
-  const t = Date.parse(s);
-  return Number.isNaN(t) ? null : new Date(t).toISOString();
-}
-
-// ---------------------------------------------------------------------
-//  DASHBOARD
-// ---------------------------------------------------------------------
-let attendanceChart = null;
-
-async function loadDashboard() {
-  await Promise.all([loadAttendanceChart(), loadRankings(), loadLoot()]);
-}
-
-async function loadAttendanceChart() {
-  const { data, error } = await supabase
-    .from("attendance_by_raid")
-    .select("*")
-    .order("raid_date", { ascending: true });
-  if (error) return;
-
-  const labels = data.map((r) => r.raid_date);
-  const present = data.map((r) => r.present_count);
-
-  const ctx = $("attendance-chart");
-  if (attendanceChart) attendanceChart.destroy();
-  // Chart.js is loaded globally from the CDN in index.html
-  attendanceChart = new window.Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "Players present",
-          data: present,
-          borderColor: "#c9a227",
-          backgroundColor: "rgba(201,162,39,.15)",
-          fill: true,
-          tension: 0.3,
-          pointRadius: 3,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color: "#e7e2d6" } } },
-      scales: {
-        x: { ticks: { color: "#9a9384" }, grid: { color: "#2a2620" } },
-        y: {
-          beginAtZero: true,
-          ticks: { color: "#9a9384" },
-          grid: { color: "#2a2620" },
-        },
-      },
-    },
-  });
-}
-
-async function loadRankings() {
-  const { data, error } = await supabase.from("player_rankings").select("*");
-  if (error) return;
-  const rows = (data || []).sort(
-    (a, b) => b.avg_preparedness - a.avg_preparedness
-  );
-
-  const tbody = $("rankings-body");
-  tbody.innerHTML = "";
-  for (const r of rows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="name">${esc(r.name)}</td>
-      <td>${esc(r.class || "—")}</td>
-      <td>${r.attendance_pct}%</td>
-      <td>${r.avg_preparedness}</td>
-      <td>${r.avg_consumable_efficiency}%</td>
-      <td>${r.avg_flask_uptime}%</td>
-      <td class="${r.death_cost_index > 3 ? "warn" : ""}">${r.death_cost_index}</td>
-      <td>${r.items_won}</td>
-      <td class="${lootBalanceClass(r.loot_balance_ratio)}">${r.loot_balance_ratio}</td>`;
-    tbody.appendChild(tr);
-  }
-}
-
-function lootBalanceClass(ratio) {
-  if (ratio >= 1.5) return "warn"; // getting a lot relative to contribution
-  if (ratio <= 0.3) return "ok"; // under-rewarded reliable raider
-  return "";
-}
-
-async function loadLoot() {
-  const { data, error } = await supabase
-    .from("loot_history")
-    .select("item_name, item_id, source_boss, response, won_at, players(name, class)")
-    .order("won_at", { ascending: false })
-    .limit(500);
-  if (error) return;
-
-  const all = data.map((l) => ({
-    player: l.players?.name || "—",
-    cls: l.players?.class || "",
-    item: l.item_name || "—",
-    itemId: l.item_id,
-    boss: l.source_boss || "—",
-    response: l.response || "",
-    date: l.won_at ? l.won_at.slice(0, 10) : "",
+  $("psearch").addEventListener("input",draw);
+  root().querySelectorAll("th[data-k]").forEach((th)=>th.addEventListener("click",()=>{
+    const k=th.dataset.k; playersSort.dir = playersSort.key===k?-playersSort.dir:-1; playersSort.key=k; draw();
   }));
+  draw();
+}
 
-  const render = (rows) => {
-    const tbody = $("loot-body");
-    tbody.innerHTML = "";
-    for (const l of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${esc(l.player)}</td>
-        <td>${esc(l.item)}</td>
-        <td>${esc(l.boss)}</td>
-        <td>${esc(l.response)}</td>
-        <td>${esc(l.date)}</td>`;
-      tbody.appendChild(tr);
-    }
-    $("loot-count").textContent = `${rows.length} awards`;
-  };
+// -------------------------------------------------------- PLAYER PROFILE
+async function renderPlayerProfile(pid){
+  const [rankArr, prep, loot] = await Promise.all([
+    sb.from("player_rankings").select("*").eq("player_id",pid).then(r=>r.data||[]),
+    sb.from("preparedness").select("preparedness_score,coverage_pct,flask_uptime_pct,elixir_uptime_pct,food_uptime_pct,consumable_efficiency,raids(raid_date,zone_name)").eq("player_id",pid).then(r=>r.data||[]),
+    sb.from("loot_history").select("item_name,source_boss,response,won_at,raids(raid_date)").eq("player_id",pid).order("won_at",{ascending:false}).then(r=>r.data||[]),
+  ]);
+  const p = rankArr[0];
+  if(!p){ root().innerHTML=`<div class="card"><div class="empty">Player not found.</div></div>`; return; }
+  const trend = [...prep].sort((a,b)=>new Date(a.raids?.raid_date)-new Date(b.raids?.raid_date));
+  const avg=(k)=> prep.length?Math.round(prep.reduce((a,r)=>a+r[k],0)/prep.length):0;
+
+  root().innerHTML = `
+  <div class="back" id="back">← Players</div>
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+      <span class="pill-dot" style="width:14px;height:14px;background:${classColor(p.class)}"></span>
+      <h2 style="font-size:1.35rem">${esc(p.name)}</h2>
+      <span class="cls" style="color:var(--muted)">${esc(p.class||"")} ${esc(p.spec||"")}</span>
+    </div>
+    <div class="grid-stats" style="margin-top:1rem;margin-bottom:0">
+      <div class="stat"><div class="label">Attendance</div><div class="value num">${p.attendance_pct}%</div></div>
+      <div class="stat"><div class="label">Preparedness</div><div class="value num">${p.avg_preparedness}</div></div>
+      <div class="stat"><div class="label">Items won</div><div class="value num">${p.items_won}</div></div>
+      <div class="stat"><div class="label">Death cost index</div><div class="value num">${p.death_cost_index}</div></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2>Preparedness breakdown</h2><div class="sub">Averaged across ${prep.length} raid${prep.length===1?"":"s"}.</div>
+      <div class="bars">
+        ${[["Flask/elixir coverage",avg("coverage_pct")],["Flask uptime",avg("flask_uptime_pct")],["Elixir uptime",avg("elixir_uptime_pct")],["Food uptime",avg("food_uptime_pct")],["Potion efficiency",avg("consumable_efficiency")]]
+          .map(([l,v])=>`<div class="barrow"><span class="lbl">${l}</span><div class="meter"><span style="width:${v}%;background:${meterColor(v)}"></span></div><span class="num">${v}</span></div>`).join("")}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Deaths</h2><div class="sub">Across all logged raids.</div>
+      <div class="grid-stats" style="grid-template-columns:1fr 1fr;margin:0">
+        <div class="stat"><div class="label">Avoidable</div><div class="value num" style="color:var(--bad-ink)">${p.avoidable_deaths}</div></div>
+        <div class="stat"><div class="label">Unavoidable</div><div class="value num">${p.unavoidable_deaths}</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Preparedness trend</h2><div class="sub">Score per raid night.</div>
+    <canvas id="pp-chart" height="80"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Loot history</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Item</th><th class="no-sort">Boss</th><th class="no-sort">Response</th><th class="no-sort">Date</th></tr></thead>
+      <tbody>${loot.map((l)=>`<tr><td>${esc(l.item_name)}</td><td>${esc(l.source_boss)}</td><td>${esc(l.response||"")}</td><td>${fmtDate(l.won_at||l.raids?.raid_date)}</td></tr>`).join("")||`<tr><td colspan="4"><div class="empty">No loot recorded.</div></td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+  $("back").addEventListener("click",()=>setView("players"));
+  drawTrend("pp-chart", trend.map((r)=>r.raids?.raid_date), trend.map((r)=>r.preparedness_score), "Preparedness", true);
+}
+
+// ---------------------------------------------------------------- RAIDS
+async function renderRaids(){
+  const manifest = await rows("raid_manifest");
+  root().innerHTML = `
+  <div class="card">
+    <h2>Raid nights</h2><div class="sub">Click a raid to see that night's report.</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Date</th><th class="no-sort">Zone</th><th class="no-sort">Difficulty</th><th class="num no-sort">Players</th><th class="num no-sort">Loot</th></tr></thead>
+      <tbody>${manifest.map((r)=>`<tr class="clickable" data-rid="${r.raid_id}">
+        <td>${fmtDate(r.raid_date)}</td><td>${esc(r.zone_name)}</td><td>${esc(r.difficulty||"—")}</td>
+        <td class="num">${r.players}</td><td class="num">${r.loot_awards}</td></tr>`).join("")||`<tr><td colspan="5"><div class="empty">No raids yet.</div></td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+  root().querySelectorAll("[data-rid]").forEach((el)=>el.addEventListener("click",()=>setView("raid",Number(el.dataset.rid))));
+}
+
+async function renderRaidDetail(rid){
+  const [rInfo, att, loot] = await Promise.all([
+    sb.from("raids").select("*").eq("id",rid).single().then(r=>r.data),
+    sb.from("attendance").select("status,players(id,name,class),raid_id").eq("raid_id",rid).then(r=>r.data||[]),
+    sb.from("loot_history").select("item_name,source_boss,response,players(name,class)").eq("raid_id",rid).then(r=>r.data||[]),
+  ]);
+  const [prep, perf] = await Promise.all([
+    sb.from("preparedness").select("player_id,preparedness_score,coverage_pct,food_uptime_pct,consumable_efficiency").eq("raid_id",rid).then(r=>r.data||[]),
+    sb.from("performance").select("player_id,avoidable_deaths,unavoidable_deaths").eq("raid_id",rid).then(r=>r.data||[]),
+  ]);
+  const prepBy=Object.fromEntries(prep.map((x)=>[x.player_id,x]));
+  const perfBy=Object.fromEntries(perf.map((x)=>[x.player_id,x]));
+  const list=att.map((a)=>({name:a.players.name,cls:a.players.class,pid:a.players.id,
+    prep:prepBy[a.players.id]?.preparedness_score??0, cov:prepBy[a.players.id]?.coverage_pct??0,
+    av:perfBy[a.players.id]?.avoidable_deaths??0, un:perfBy[a.players.id]?.unavoidable_deaths??0}))
+    .sort((a,b)=>b.prep-a.prep);
+
+  root().innerHTML=`
+  <div class="back" id="back">← Raids</div>
+  <div class="card">
+    <h2>${esc(rInfo.zone_name)} — ${fmtDate(rInfo.raid_date)}</h2>
+    <div class="sub">${esc(rInfo.difficulty||"")} · ${list.length} players · ${loot.length} items</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Player</th><th class="no-sort">Prepared</th><th class="num no-sort">Avoid.</th><th class="num no-sort">Unavoid.</th></tr></thead>
+      <tbody>${list.map((p)=>`<tr class="clickable" data-pid="${p.pid}"><td>${pname(p.name,p.cls)}</td><td>${meter(p.prep)}</td><td class="num">${p.av}</td><td class="num">${p.un}</td></tr>`).join("")}</tbody>
+    </table></div>
+  </div>
+  <div class="card">
+    <h2>Loot dropped</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Winner</th><th class="no-sort">Item</th><th class="no-sort">Boss</th><th class="no-sort">Response</th></tr></thead>
+      <tbody>${loot.map((l)=>`<tr><td>${pname(l.players?.name,l.players?.class)}</td><td>${esc(l.item_name)}</td><td>${esc(l.source_boss)}</td><td>${esc(l.response||"")}</td></tr>`).join("")||`<tr><td colspan="4"><div class="empty">No loot recorded.</div></td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+  $("back").addEventListener("click",()=>setView("raids"));
+  root().querySelectorAll("[data-pid]").forEach((el)=>el.addEventListener("click",()=>setView("player",Number(el.dataset.pid))));
+}
+
+// ----------------------------------------------------------------- LOOT
+async function renderLoot(){
+  const data = await sb.from("loot_history").select("item_name,source_boss,response,won_at,players(name,class)").order("won_at",{ascending:false}).limit(1000).then(r=>r.data||[]);
+  const all=data.map((l)=>({player:l.players?.name||"—",cls:l.players?.class,item:l.item_name||"—",boss:l.source_boss||"—",response:l.response||"",date:l.won_at?l.won_at.slice(0,10):""}));
+  root().innerHTML=`
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:.6rem;flex-wrap:wrap">
+      <div><h2>Loot distribution</h2><div class="sub" style="margin:0">Every award, newest first.</div></div>
+      <input id="lsearch" placeholder="Search player, item, boss…" style="max-width:300px" />
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Winner</th><th class="no-sort">Item</th><th class="no-sort">Boss</th><th class="no-sort">Response</th><th class="no-sort">Date</th></tr></thead>
+      <tbody id="lbody"></tbody>
+    </table></div>
+    <div class="sub" id="lcount" style="margin-top:.6rem"></div>
+  </div>`;
+  const render=(list)=>{ $("lbody").innerHTML=list.map((l)=>`<tr><td>${pname(l.player,l.cls)}</td><td>${esc(l.item)}</td><td>${esc(l.boss)}</td><td>${esc(l.response)}</td><td>${esc(l.date)}</td></tr>`).join("")||`<tr><td colspan="5"><div class="empty">No loot matches.</div></td></tr>`;
+    $("lcount").textContent=`${list.length} awards`; };
   render(all);
-
-  $("loot-search").oninput = (e) => {
-    const q = e.target.value.toLowerCase().trim();
-    if (!q) return render(all);
-    render(
-      all.filter(
-        (l) =>
-          l.player.toLowerCase().includes(q) ||
-          l.item.toLowerCase().includes(q) ||
-          l.boss.toLowerCase().includes(q)
-      )
-    );
-  };
+  $("lsearch").addEventListener("input",(e)=>{ const t=e.target.value.toLowerCase().trim();
+    render(!t?all:all.filter((l)=>l.player.toLowerCase().includes(t)||l.item.toLowerCase().includes(t)||l.boss.toLowerCase().includes(t))); });
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+// --------------------------------------------------------------- UPLOAD
+const staged={ combat:null, combatText:null, combatName:null, loot:null, lootText:null, lootName:null };
+async function renderUpload(){
+  const manifest = await rows("raid_manifest");
+  root().innerHTML=`
+  <div class="card">
+    <h2>Upload a raid night</h2>
+    <div class="sub">Drop the files, check the details, save. Re-uploading the exact same file is detected and skipped.</div>
+    <div class="drops">
+      <div class="drop" id="drop-combat"><div class="big">Combat log</div><div class="hint">WoWCombatLog.txt</div><input type="file" accept=".txt,text/plain"/><div class="status info" id="cs"></div></div>
+      <div class="drop" id="drop-loot"><div class="big">RCLootCouncil export</div><div class="hint">JSON / CSV / Lua</div><input type="file" accept=".json,.csv,.txt,.lua"/><div class="status info" id="ls"></div></div>
+    </div>
+    <div class="raidform">
+      <div><label>Date</label><input id="rdate" type="date"/></div>
+      <div><label>Zone / instance</label><input id="rzone" type="text" placeholder="Serpentshrine Cavern"/></div>
+      <div><label>Difficulty</label><input id="rdiff" type="text" placeholder="25 Player"/></div>
+      <div><button id="save" class="btn" disabled>Save</button></div>
+    </div>
+    <div class="status" id="ss" style="margin-top:.7rem"></div>
+  </div>
+  <div class="card">
+    <h2>Manage uploads</h2><div class="sub">Delete a raid night to remove all its data (attendance, prep, deaths, loot).</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Date</th><th class="no-sort">Zone</th><th class="num no-sort">Players</th><th class="num no-sort">Loot</th><th class="no-sort"></th></tr></thead>
+      <tbody id="mbody">${manifest.map((r)=>`<tr><td>${fmtDate(r.raid_date)}</td><td>${esc(r.zone_name)}</td><td class="num">${r.players}</td><td class="num">${r.loot_awards}</td><td style="text-align:right"><button class="btn danger sm" data-del="${r.raid_id}" data-lbl="${esc(r.zone_name)} ${esc(r.raid_date)}">Delete</button></td></tr>`).join("")||`<tr><td colspan="5"><div class="empty">No uploads yet.</div></td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+
+  wireDrop("drop-combat",(name,text)=>{
+    try{ staged.combat=parseCombatLog(text); staged.combatText=text; staged.combatName=name;
+      const m=staged.combat.meta;
+      setStatus("cs",`✓ ${name}: ${staged.combat.players.length} players, ${m.encounters.length} encounters`,"ok");
+      $("rdate").value=m.raidDate; if(!$("rzone").value)$("rzone").value=m.zoneNameGuess; if(!$("rdiff").value)$("rdiff").value=m.difficulty;
+      $("save").disabled=false;
+    }catch(e){ setStatus("cs",`Couldn't parse: ${e.message}`,"err"); }
+  });
+  wireDrop("drop-loot",(name,text)=>{
+    try{ staged.loot=parseRCLootCouncil(text); staged.lootText=text; staged.lootName=name;
+      setStatus("ls",`✓ ${name}: ${staged.loot.loot.length} awards`,"ok");
+    }catch(e){ setStatus("ls",`Couldn't parse: ${e.message}`,"err"); }
+  });
+  $("save").addEventListener("click",saveRaid);
+  $("mbody").querySelectorAll("[data-del]").forEach((b)=>b.addEventListener("click",()=>deleteRaid(Number(b.dataset.del),b.dataset.lbl)));
+}
+function wireDrop(id,cb){
+  const z=$(id), input=z.querySelector("input");
+  const read=(f)=>{ if(!f)return; const r=new FileReader(); r.onload=()=>cb(f.name,r.result); r.readAsText(f); };
+  ["dragenter","dragover"].forEach((e)=>z.addEventListener(e,(ev)=>{ev.preventDefault();z.classList.add("drag");}));
+  ["dragleave","drop"].forEach((e)=>z.addEventListener(e,(ev)=>{ev.preventDefault();z.classList.remove("drag");}));
+  z.addEventListener("drop",(ev)=>read(ev.dataTransfer.files[0]));
+  z.addEventListener("click",()=>input.click());
+  input.addEventListener("change",(ev)=>read(ev.target.files[0]));
+}
+function setStatus(id,msg,kind){ const el=$(id); el.textContent=msg; el.className=`status ${kind||"info"}`; }
+
+async function saveRaid(){
+  const btn=$("save"); btn.disabled=true; setStatus("ss","Saving…","info");
+  try{
+    if(!staged.combat) throw new Error("Drop a combat log first.");
+    // dedupe: has this exact file been imported before?
+    const combatHash=await hashText(staged.combatText);
+    const dupe=await sb.from("imports").select("raid_id").eq("file_hash",combatHash).maybeSingle().then(r=>r.data);
+    if(dupe){ setStatus("ss",`This combat log was already imported (raid #${dupe.raid_id}). Skipped.`,"err"); btn.disabled=false; return; }
+
+    // players
+    const classBy=new Map(); (staged.loot?.players||[]).forEach((p)=>classBy.set(p.name,p.class));
+    const names=new Set(staged.combat.players.map((p)=>p.name)); (staged.loot?.loot||[]).forEach((l)=>names.add(l.player));
+    const { error:pe }=await sb.from("players").upsert([...names].map((n)=>({name:n,class:classBy.get(n)||null})),{onConflict:"name"}); if(pe) throw pe;
+    const pd=await sb.from("players").select("id,name").in("name",[...names]).then(r=>r.data||[]);
+    const idBy=new Map(pd.map((p)=>[p.name,p.id]));
+
+    // raid
+    const raidRow={ raid_date:$("rdate").value, zone_name:$("rzone").value||staged.combat.meta.zoneNameGuess, difficulty:$("rdiff").value||staged.combat.meta.difficulty };
+    const raid=await sb.from("raids").upsert(raidRow,{onConflict:"raid_date,zone_name,difficulty"}).select("id").single().then(r=>{ if(r.error) throw r.error; return r.data; });
+    const raidId=raid.id;
+
+    const att=[],prep=[],perf=[];
+    for(const p of staged.combat.players){ const pid=idBy.get(p.name); if(!pid)continue;
+      att.push({raid_id:raidId,player_id:pid,status:p.status});
+      prep.push({raid_id:raidId,player_id:pid,flasks_used:p.flasks_used,flask_uptime_pct:p.flask_uptime_pct,elixir_uptime_pct:p.elixir_uptime_pct,food_uptime_pct:p.food_uptime_pct,coverage_pct:p.coverage_pct,potions_used:p.potions_used,potions_effective:p.potions_effective,consumable_efficiency:p.consumable_efficiency,preparedness_score:p.preparedness_score});
+      perf.push({raid_id:raidId,player_id:pid,avoidable_deaths:p.avoidable_deaths,unavoidable_deaths:p.unavoidable_deaths,death_cost_index:p.death_cost_index});
+    }
+    await up("attendance",att,"raid_id,player_id");
+    await up("preparedness",prep,"raid_id,player_id");
+    await up("performance",perf,"raid_id,player_id");
+
+    if(staged.loot?.loot?.length){
+      const lootRows=staged.loot.loot.map((l)=>{ const pid=idBy.get(l.player); if(!pid)return null;
+        return {raid_id:raidId,player_id:pid,item_name:l.item_name,item_id:l.item_id,source_boss:l.source_boss,response:l.response,won_at:l.date?safeDate(l.date):null}; }).filter(Boolean);
+      await up("loot_history",lootRows,"raid_id,player_id,item_id,source_boss,won_at");
+    }
+
+    // record import fingerprints
+    const imports=[{file_hash:combatHash,file_name:staged.combatName,kind:"combatlog",raid_id:raidId}];
+    if(staged.lootText) imports.push({file_hash:await hashText(staged.lootText),file_name:staged.lootName,kind:"rcloot",raid_id:raidId});
+    await sb.from("imports").upsert(imports,{onConflict:"file_hash",ignoreDuplicates:true});
+
+    setStatus("ss",`Saved raid #${raidId}.`,"ok");
+    staged.combat=staged.loot=staged.combatText=staged.lootText=null;
+    setTimeout(()=>setView("home"),700);
+  }catch(e){ setStatus("ss",`Save failed: ${e.message||e}`,"err"); btn.disabled=false; }
+}
+async function up(table,rowsArr,onConflict){ if(!rowsArr.length)return; const { error }=await sb.from(table).upsert(rowsArr,{onConflict}); if(error) throw new Error(`${table}: ${error.message}`); }
+function safeDate(s){ const t=Date.parse(s); return Number.isNaN(t)?null:new Date(t).toISOString(); }
+
+async function deleteRaid(rid,label){
+  if(!confirm(`Delete "${label}" and all its attendance, preparedness, deaths, and loot? This can't be undone.`)) return;
+  const { error }=await sb.from("raids").delete().eq("id",rid);
+  if(error){ alert("Delete failed: "+error.message); return; }
+  setView("upload");
 }
 
-// keep the UI in sync if the token refreshes / expires
-supabase.auth.onAuthStateChange(() => refreshAuthUI());
-refreshAuthUI();
+// ----------------------------------------------------------- chart helper
+function drawTrend(canvasId,labels,data,label,zeroToHundred){
+  const ctx=$(canvasId); if(!ctx)return;
+  const c=new window.Chart(ctx,{type:"line",data:{labels,datasets:[{label,data,
+    borderColor:"#6b57e6",backgroundColor:"rgba(107,87,230,.12)",fill:true,tension:.3,pointRadius:3,pointBackgroundColor:"#6b57e6"}]},
+    options:{responsive:true,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:"#727a8c",font:{size:11}},grid:{color:"#eef1f7"}},
+        y:{beginAtZero:true,suggestedMax:zeroToHundred?100:undefined,ticks:{color:"#727a8c",font:{size:11}},grid:{color:"#eef1f7"}}}}});
+  charts.push(c);
+}
+
+refreshAuth();

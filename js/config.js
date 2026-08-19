@@ -1,68 +1,63 @@
 // =====================================================================
-//  CONFIG — edit this file, nothing secret lives here.
-//  The anon key is safe to expose in a static site: RLS on the server
-//  is what actually protects your data. Never put the service_role key
-//  in frontend code.
+//  CONFIG — edit this file. Nothing secret lives here.
+//  The publishable/anon key is safe in a static site; RLS protects data.
+//  Never put the service_role / secret key in frontend code.
 // =====================================================================
 
 export const SUPABASE_URL = "https://khnihlfkypljxqimdjww.supabase.co";
 export const SUPABASE_ANON_KEY = "sb_publishable_PJ1QUm6oLlCptHiRgWrUPw_MjbS9tGz";
 
 // ---------------------------------------------------------------------
-//  COMBAT-LOG TUNING
-//  Spell IDs differ by expansion/patch. Fill these with the IDs your
-//  guild actually uses. You can find them on Wowhead or by grepping the
-//  log for the spell name in SPELL_AURA_APPLIED / SPELL_CAST_SUCCESS.
+//  CONSUMABLE DETECTION
+//  TBC has hundreds of flasks/elixirs/foods. Rather than list every ID,
+//  we match on the BUFF NAME in the combat log (robust across patches).
+//  Potions are matched by spell ID because they're cast events with
+//  precise, well-known IDs.
 // ---------------------------------------------------------------------
 
-// Flasks apply a 2-hour buff aura (SPELL_AURA_APPLIED). TBC Classic IDs:
-export const FLASK_SPELL_IDS = new Set([
-  28521, // Flask of Blinding Light   (+80 arcane/holy/nature spell dmg)
-  28589, // Flask of Relentless Assault (+120 attack power)
-  28591, // Flask of Pure Death        (+80 fire/frost/shadow spell dmg)
-  28588, // Flask of Mighty Restoration (+25 mp5)
-  28587, // Flask of Fortification     (+500 health, +10 defense — tanks)
-  42736, // Flask of Chromatic Wonder  (+18 all stats, +35 all resist)
-]);
+// Aura-name patterns (case-insensitive) for buffs in SPELL_AURA_APPLIED.
+export const CONSUMABLE_PATTERNS = {
+  flask:  /flask/i,       // "Flask of Relentless Assault", etc.
+  elixir: /elixir/i,      // any Battle or Guardian elixir
+  food:   /well fed/i,    // the standard raiding food buff
+};
 
-// Combat potions cast mid-fight (SPELL_CAST_SUCCESS). TBC Classic IDs.
-// Note: TBC potions share a ~2-min cooldown, so multiple per long fight is
-// legitimate — this list is what counts as "using your combat potion".
+// Optional extra buff spell IDs to force-count. Usually leave empty.
+export const EXTRA_FLASK_IDS  = new Set([]);
+export const EXTRA_ELIXIR_IDS = new Set([]);
+
+// Combat potions cast mid-fight (SPELL_CAST_SUCCESS), by spell ID.
 export const POTION_SPELL_IDS = new Set([
-  28564, // Haste Potion            (+400 haste, 15s — melee/ranged burst)
-  28565, // Destruction Potion      (+120 spell power, +2% crit — casters)
-  28550, // Insane Strength Potion  (+120 str, +5% crit, -10 defense — melee)
-  38961, // Fel Mana Potion         (mana restore — casters)
-  28555, // Super Mana Potion       (mana restore)
-  28551, // Super Healing Potion    (health restore)
+  28564, // Haste Potion
+  28565, // Destruction Potion
+  28550, // Insane Strength Potion
+  38961, // Fel Mana Potion
+  28555, // Super Mana Potion
+  28551, // Super Healing Potion
 ]);
 
-// Per-boss "avoidable" mechanic spell IDs. Death caused by one of these
-// (as the last significant hit) is counted as AVOIDABLE. Everything else
-// is treated as unavoidable/tank/execution damage.
-// Key = encounterID (from ENCOUNTER_START), value = Set of spell IDs.
-// Leaving a boss out means "use the fallback heuristic" (see parsers.js).
+// Per-boss "avoidable" mechanic spell IDs, keyed by encounterID.
+// Leave a boss out to use the fallback heuristic.
 export const AVOIDABLE_SPELL_IDS = {
-  // 2820: new Set([ 410018, 410004 ]),   // example encounterID -> mechanics
+  // 628: new Set([ 38509, 38280 ]),  // Lady Vashj: Shock Blast, Static Charge
 };
 
 // ---------------------------------------------------------------------
-//  SCORING THRESHOLDS  (all tunable, all transparent)
+//  SCORING  (all transparent and tunable)
 // ---------------------------------------------------------------------
 export const SCORING = {
-  // A pull shorter than this many seconds is treated as an instant wipe,
-  // so a potion spent on it is "wasted", not "effective".
-  instantWipeSeconds: 20,
+  instantWipeSeconds: 20, // shorter pull = instant wipe (potion wasted)
+  legitPullSeconds:   30, // pull >= this = a "real" pull
 
-  // A pull must last at least this long to count as a "legitimate" pull
-  // for potion-effectiveness purposes.
-  legitPullSeconds: 30,
+  // Preparedness = coverage*W1 + food*W2 + potionUse*W3
+  // coverage = flask up OR elixir up (credits flask AND double-elixir raiders)
+  coverageWeight: 0.5,
+  foodWeight:     0.2,
+  potionWeight:   0.3,
 
-  // preparedness_score = flaskWeight*flaskUptime + potionWeight*potionScore
-  flaskWeight: 0.7,
-  potionWeight: 0.3,
-
-  // Weight applied to avoidable vs unavoidable deaths in the Death Cost Index.
-  avoidableDeathWeight: 2.0,
+  avoidableDeathWeight:   2.0,
   unavoidableDeathWeight: 1.0,
+
+  // Loot priority: contribution / (itemsWon + 1); higher = more owed.
+  avoidableDeathPenalty: 5,
 };
