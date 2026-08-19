@@ -603,7 +603,12 @@ async function saveRaid(){
       if(lootForNight.length){
         const lootRows=lootForNight.map((l)=>{ const pid=idBy.get(l.player); if(!pid)return null;
           return {raid_id:raidId,player_id:pid,item_name:l.item_name,item_id:l.item_id,source_boss:l.source_boss,response:l.response,won_at:l.date?safeDate(l.date):null}; }).filter(Boolean);
-        await up("loot_history",lootRows,"raid_id,player_id,item_id,source_boss,won_at");
+        // drop rows that share the same conflict key within this batch
+        // (raid,player,item,boss,time) — Postgres rejects updating one row twice
+        const seen=new Set(); const deduped=[];
+        for(const row of lootRows){ const k=`${row.raid_id}|${row.player_id}|${row.item_id}|${row.source_boss}|${row.won_at}`;
+          if(seen.has(k)) continue; seen.add(k); deduped.push(row); }
+        await up("loot_history",deduped,"raid_id,player_id,item_id,source_boss,won_at");
       }
 
       await sb.from("imports").upsert([{file_hash:fp,file_name:staged.combatName,kind:"combatlog-night",raid_id:raidId}],{onConflict:"file_hash",ignoreDuplicates:true});
