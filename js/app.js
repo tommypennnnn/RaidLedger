@@ -358,13 +358,77 @@ async function renderRaidDetail(rid){
 }
 
 // ----------------------------------------------------------------- LOOT
+function gini(vals){ const v=vals.filter(x=>x>=0).sort((a,b)=>a-b); const n=v.length; if(!n)return 0;
+  const s=v.reduce((a,b)=>a+b,0); if(!s)return 0; let c=0; for(let i=0;i<n;i++)c+=(i+1)*v[i]; return Math.max(0,(2*c)/(n*s)-(n+1)/n); }
+const wow=(name,id)=> id?`<a href="https://www.wowhead.com/tbc/item=${id}" target="_blank" rel="noopener" class="wowlink">${esc(name)}</a>`:esc(name);
+
 async function renderLoot(){
-  const data = await sb.from("loot_history").select("item_name,source_boss,response,won_at,players(name,class)").order("won_at",{ascending:false}).limit(1000).then(r=>r.data||[]);
-  const all=data.map((l)=>({player:l.players?.name||"—",cls:l.players?.class,item:l.item_name||"—",boss:l.source_boss||"—",response:l.response||"",date:l.won_at?l.won_at.slice(0,10):""}));
+  const [rank, loot, raidsList] = await Promise.all([
+    rows("player_rankings"),
+    sb.from("loot_history").select("item_name,item_id,source_boss,response,won_at,player_id,players(name,class),raids(raid_date)").order("won_at",{ascending:false}).limit(2000).then(r=>r.data||[]),
+    sb.from("raids").select("id,raid_date").order("raid_date",{ascending:true}).then(r=>r.data||[]),
+  ]);
+  const raidDates=raidsList.map(r=>r.raid_date).sort();
+  // last-won date per player
+  const lastWon=new Map();
+  for(const l of loot){ const d=(l.won_at||l.raids?.raid_date||"").slice(0,10); if(!d)continue;
+    const cur=lastWon.get(l.player_id); if(!cur||d>cur) lastWon.set(l.player_id,d); }
+
+  // ---- distribution (Gini) ----
+  const withData=rank.filter(r=>r.raids_attended>0);
+  const g=gini(withData.map(r=>r.items_won));
+  const gLabel=g<0.3?"fairly even":g<0.5?"somewhat uneven":"concentrated in a few players";
+  const topShare=[...withData].sort((a,b)=>b.items_won-a.items_won).slice(0,10);
+  const totalItems=withData.reduce((a,r)=>a+r.items_won,0)||1;
+
+  // ---- loot per raid + drought ----
+  const balance=withData.map(r=>{
+    const lw=lastWon.get(r.player_id);
+    const since = lw ? raidDates.filter(d=>d>lw).length : (r.raids_attended||0);
+    return {...r, perRaid: r.raids_attended? r.items_won/r.raids_attended : 0, lastWon:lw, drought: lw?since:(r.raids_attended?`${r.raids_attended}+ (never)`:"never")};
+  }).sort((a,b)=> (typeof b.drought==="number"?b.drought:999)-(typeof a.drought==="number"?a.drought:999) || a.perRaid-b.perRaid);
+
+  // ---- contested / recurring drops (multiple distinct winners of same item) ----
+  const byItem=new Map();
+  for(const l of loot){ const k=l.item_name||"?"; if(!byItem.has(k)) byItem.set(k,{name:l.item_name,id:l.item_id,winners:new Map(),count:0});
+    const e=byItem.get(k); e.count++; e.winners.set(l.players?.name||"?", (e.winners.get(l.players?.name||"?")||0)+1); }
+  const contested=[...byItem.values()].filter(e=>e.winners.size>1).sort((a,b)=>b.winners.size-a.winners.size||b.count-a.count).slice(0,12);
+
+  const all=loot.map((l)=>({player:l.players?.name||"—",cls:l.players?.class,item:l.item_name||"—",id:l.item_id,boss:l.source_boss||"—",response:l.response||"",date:(l.won_at||l.raids?.raid_date||"").slice(0,10)}));
+
   root().innerHTML=`
+  <div class="row">
+    <div class="card">
+      <h2>Distribution fairness</h2><div class="sub">How evenly loot is spread across the roster.</div>
+      <div style="display:flex;align-items:baseline;gap:.6rem"><div class="value num" style="font-family:'Space Grotesk';font-weight:700;font-size:2rem">${g.toFixed(2)}</div><div style="color:var(--muted)">Gini — ${gLabel}</div></div>
+      <div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--surface2);margin-top:.7rem">
+        ${topShare.map((r,i)=>`<span title="${esc(r.name)}: ${r.items_won}" style="width:${100*r.items_won/totalItems}%;background:${classColor(r.class)};opacity:${1-i*0.06}"></span>`).join("")}
+      </div>
+      <div class="sub" style="margin-top:.5rem">0 = everyone equal · 1 = one person has it all. Segments = each player's share.</div>
+    </div>
+    <div class="card">
+      <h2>Contested drops</h2><div class="sub">Items that have gone to more than one player — recurring competition.</div>
+      <div class="tablewrap"><table><thead><tr><th class="no-sort">Item</th><th class="num no-sort">Times</th><th class="no-sort">Winners</th></tr></thead>
+        <tbody>${contested.map(e=>`<tr><td>${wow(e.name,e.id)}</td><td class="num">${e.count}</td><td style="font-size:.82rem">${[...e.winners.entries()].map(([n,c])=>esc(n)+(c>1?` ×${c}`:"")).join(", ")}</td></tr>`).join("")||`<tr><td colspan="3"><div class="empty">No repeated drops yet.</div></td></tr>`}</tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Loot balance &amp; drought</h2><div class="sub">Items per raid attended, and how long since each player last won something. Longest droughts first.</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="no-sort">Player</th><th class="num no-sort">Items</th><th class="num no-sort">Raids</th><th class="num no-sort">Loot / raid</th><th class="num no-sort">Drought</th><th class="no-sort">Last won</th></tr></thead>
+      <tbody>${balance.map(r=>`<tr class="clickable" data-pid="${r.player_id}">
+        <td>${pname(r.name,r.class)}</td><td class="num">${r.items_won}</td><td class="num">${r.raids_attended}</td>
+        <td class="num">${r.perRaid.toFixed(2)}</td>
+        <td class="num" style="color:${(typeof r.drought==="number"&&r.drought>=3)||typeof r.drought==="string"?"var(--warn-ink)":"inherit"};font-weight:600">${typeof r.drought==="number"?(r.drought===0?"—":r.drought+" raids"):r.drought}</td>
+        <td>${r.lastWon?fmtDate(r.lastWon):"—"}</td></tr>`).join("")||`<tr><td colspan="6"><div class="empty">No data yet.</div></td></tr>`}</tbody>
+    </table></div>
+  </div>
+
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:.6rem;flex-wrap:wrap">
-      <div><h2>Loot distribution</h2><div class="sub" style="margin:0">Every award, newest first.</div></div>
+      <div><h2>Loot ledger</h2><div class="sub" style="margin:0">Every award, newest first. Item names link to Wowhead.</div></div>
       <input id="lsearch" placeholder="Search player, item, boss…" style="max-width:300px" />
     </div>
     <div class="tablewrap"><table>
@@ -373,7 +437,9 @@ async function renderLoot(){
     </table></div>
     <div class="sub" id="lcount" style="margin-top:.6rem"></div>
   </div>`;
-  const render=(list)=>{ $("lbody").innerHTML=list.map((l)=>`<tr><td>${pname(l.player,l.cls)}</td><td>${esc(l.item)}</td><td>${esc(l.boss)}</td><td>${esc(l.response)}</td><td>${esc(l.date)}</td></tr>`).join("")||`<tr><td colspan="5"><div class="empty">No loot matches.</div></td></tr>`;
+
+  root().querySelectorAll("[data-pid]").forEach(el=>el.addEventListener("click",()=>setView("player",Number(el.dataset.pid))));
+  const render=(list)=>{ $("lbody").innerHTML=list.map((l)=>`<tr><td>${pname(l.player,l.cls)}</td><td>${wow(l.item,l.id)}</td><td>${esc(l.boss)}</td><td>${esc(l.response)}</td><td>${esc(l.date)}</td></tr>`).join("")||`<tr><td colspan="5"><div class="empty">No loot matches.</div></td></tr>`;
     $("lcount").textContent=`${list.length} awards`; };
   render(all);
   $("lsearch").addEventListener("input",(e)=>{ const t=e.target.value.toLowerCase().trim();
