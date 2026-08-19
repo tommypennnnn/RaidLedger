@@ -98,7 +98,9 @@ export function parseCombatLog(text){
     for(const ts of p.potionCasts){ const e=encounterAt(encounters,ts); if(e&&e.durationSec>=SCORING.legitPullSeconds) potionsEffective++; }
     const potionsUsed=p.potionCasts.length;
     const consumableEfficiency=potionsUsed>0?(potionsEffective/potionsUsed)*100:0;
-    const potionScore=legitPulls.length>0?clamp((potionsEffective/legitPulls.length)*100,0,100):0;
+    // Potion component: did they use a combat potion during boss fights at all?
+    // Yes (>=1 effective) = full marks; No = 0. Not per-pull.
+    const potionScore = potionsEffective >= 1 ? 100 : 0;
     const preparednessScore=SCORING.coverageWeight*coverage+SCORING.foodWeight*foodU+SCORING.potionWeight*potionScore;
     const avoidable=p.deaths.filter((d)=>d.avoidable).length;
     const unavoidable=p.deaths.length-avoidable;

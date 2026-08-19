@@ -239,32 +239,29 @@ async function renderPlayerProfile(pid){
       <div class="bars" style="margin-top:.8rem">
         <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--accent)"></span> Coverage</span><div class="meter"><span style="width:${avg("coverage_pct")}%;background:var(--accent)"></span></div><span class="num">${avg("coverage_pct")}%</span></div>
         <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--good)"></span> Food</span><div class="meter"><span style="width:${avg("food_uptime_pct")}%;background:var(--good)"></span></div><span class="num">${avg("food_uptime_pct")}%</span></div>
-        <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--warn)"></span> Potions on pulls</span><div class="meter"><span style="width:${avg("potion_score")}%;background:var(--warn)"></span></div><span class="num">${avg("potion_score")}%</span></div>
+        <div class="barrow"><span class="lbl"><span class="pill-dot" style="background:var(--warn)"></span> Potions used</span><div class="meter"><span style="width:${avg("potion_score")}%;background:var(--warn)"></span></div><span class="num">${avg("potion_score")}%</span></div>
       </div>
       <div class="sub" style="margin-top:.6rem">
         Score = <b>${Math.round(avg("coverage_pct")*SCORING.coverageWeight)}</b> coverage + <b>${Math.round(avg("food_uptime_pct")*SCORING.foodWeight)}</b> food + <b>${Math.round(avg("potion_score")*SCORING.potionWeight)}</b> potions = <b>${p.avg_preparedness}</b>
       </div>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort" title="Potions used on boss pulls (effective / total pulls)">Potions</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
+      <thead><tr><th class="no-sort">Date</th><th class="num no-sort">Cover</th><th class="num no-sort">Flask</th><th class="num no-sort">Elixir</th><th class="num no-sort">Food</th><th class="num no-sort" title="Combat potions used during boss fights">Potions</th><th class="num no-sort">Score</th><th class="no-sort">Consumables run</th></tr></thead>
       <tbody>${byDate.map((r)=>`<tr>
         <td>${fmtDate(r.raids?.raid_date)}</td>
         <td class="num">${pct(r.coverage_pct)}</td>
         <td class="num">${pct(r.flask_uptime_pct)}</td>
         <td class="num">${pct(r.elixir_uptime_pct)}</td>
         <td class="num">${pct(r.food_uptime_pct)}</td>
-        <td class="num" title="${r.potions_used} used, ${r.potions_effective} effective (${r.consumable_efficiency}% efficiency)" style="color:${pctColor(r.potion_score)};font-weight:600">${r.potions_effective}/${r.legit_pulls}</td>
+        <td class="num" title="${r.potions_used} cast total, ${r.potions_effective} during boss fights${r.potions_used>r.potions_effective?` (${r.potions_used-r.potions_effective} wasted)`:``}" style="color:${r.potions_effective>0?'var(--good-ink)':'var(--bad-ink)'};font-weight:600">${r.potions_effective>0?'✓ '+r.potions_effective:'✗ 0'}</td>
         <td class="num" style="font-weight:600">${r.preparedness_score}</td>
         <td>${consumCell(r)}</td></tr>`).join("")||`<tr><td colspan="8"><div class="empty">No raids recorded.</div></td></tr>`}</tbody>
     </table></div>
     <details style="margin-top:.7rem"><summary style="cursor:pointer;color:var(--muted);font-size:.85rem">How is the preparedness score calculated?</summary>
       <div style="font-size:.85rem;color:var(--ink2);margin-top:.5rem;line-height:1.55">
-        Score (0–100) = <b>${Math.round(SCORING.coverageWeight*100)}% coverage</b> + <b>${Math.round(SCORING.foodWeight*100)}% food</b> + <b>${Math.round(SCORING.potionWeight*100)}% potions-on-pulls</b>, measured only during boss fights.<br><br>
+        Score (0–100) = <b>${Math.round(SCORING.coverageWeight*100)}% coverage</b> + <b>${Math.round(SCORING.foodWeight*100)}% food</b> + <b>${Math.round(SCORING.potionWeight*100)}% potions</b>, measured only during boss fights.<br><br>
         <b>Coverage</b> is satisfied by a flask <i>or</i> by running both a battle and a guardian elixir, so a double-elixir raider isn't penalised for skipping a flask. <b>Food</b> is “Well Fed” uptime.<br><br>
-        <b>Two different potion numbers — don't confuse them:</b><br>
-        • <b>Potions column (e.g. 6/10):</b> drank a potion on 6 of the night's 10 boss pulls. <i>This is what the score uses.</i><br>
-        • <b>Efficiency (hover the Potions cell, e.g. 100%):</b> of the potions they drank, how many were well-timed (not wasted on a wipe). This does <i>not</i> feed the score.<br><br>
-        So a raider who drinks 6 well-timed potions across a 10-boss night shows <b>100% efficiency</b> but only <b>60% on-pulls</b> — the potion part contributes ${Math.round(SCORING.potionWeight*100)}% × 60 = ${Math.round(SCORING.potionWeight*60)} points, not the full ${Math.round(SCORING.potionWeight*100)}. That's why a perfectly-flasked, fed raider can sit at 88 rather than 100. Weights are editable in <code>config.js</code>.
+        <b>Potions</b> is simply: did they use a combat potion during boss fights? <b>Yes = full ${Math.round(SCORING.potionWeight*100)} points, however many they used; no = 0.</b> The Potions column shows a ✓ with the count (✗ if none). Hover it to see how many were cast in total and whether any were wasted on a wipe — that detail is informational and doesn't change the score. Weights are editable in <code>config.js</code>.
       </div></details>
   </div>
 
