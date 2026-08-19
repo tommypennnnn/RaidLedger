@@ -413,7 +413,7 @@ async function renderUpload(){
       const nights=staged.combat.raids;
       if(nights.length===0){ setStatus("cs","No boss encounters found in this log.","err"); return; }
       if(nights.length===1){ const m=nights[0].meta;
-        setStatus("cs",`✓ ${name}: 1 raid night — ${m.raidDate}, ${m.players.length} players, ${m.encounters.length} bosses`,"ok");
+        setStatus("cs",`✓ ${name}: 1 raid night — ${m.raidDate}, ${nights[0].players.length} players, ${m.encounters.length} bosses`,"ok");
         $("rdate").value=m.raidDate; if(!$("rzone").value)$("rzone").value=m.zoneNameGuess; if(!$("rdiff").value)$("rdiff").value=m.difficulty;
       } else {
         const list=nights.map((n)=>`${n.meta.raidDate} (${n.meta.encounters.length} bosses)`).join(", ");
