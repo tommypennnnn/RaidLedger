@@ -16,24 +16,67 @@ export const SUPABASE_ANON_KEY = "sb_publishable_PJ1QUm6oLlCptHiRgWrUPw_MjbS9tGz
 // ---------------------------------------------------------------------
 
 // Aura-name patterns (case-insensitive) for buffs in SPELL_AURA_APPLIED.
+//  - flask:  every flask in the game is named "Flask of ..." (TBC, Shattrath,
+//            Unstable, and leftover Classic flasks all included), so /flask/i
+//            already covers 100% of them.
+//  - elixir: every TBC battle/guardian elixir is named "Elixir ...". The one
+//            common raid consumable in the guardian slot that ISN'T named
+//            "elixir" is the classic Mageblood Potion, so we add it by name.
+//            (Ultra-rare Classic leftovers — Winterfall Firewater, Juju
+//             Might/Power, Ground Scorpok Assay, Zanza buffs — can be added
+//             the same way if your logs ever show them.)
+//  - food:   TBC stat foods apply the "Well Fed" aura. If you ever see a food
+//            being missed, widen this the same way.
 export const CONSUMABLE_PATTERNS = {
-  flask:  /flask/i,       // "Flask of Relentless Assault", etc.
-  elixir: /elixir/i,      // any Battle or Guardian elixir
-  food:   /well fed/i,    // the standard raiding food buff
+  flask:  /flask/i,
+  elixir: /elixir|mageblood/i,
+  food:   /well fed/i,
 };
 
-// Optional extra buff spell IDs to force-count. Usually leave empty.
+// Optional extra buff spell IDs to force-count. Usually leave empty because
+// the name patterns above already catch everything relevant.
 export const EXTRA_FLASK_IDS  = new Set([]);
 export const EXTRA_ELIXIR_IDS = new Set([]);
 
 // Combat potions cast mid-fight (SPELL_CAST_SUCCESS), by spell ID.
+// IDs verified against Wowhead TBC Classic (patch 2.5.6).
+// Grouped so you can comment out a whole category you don't want to score.
 export const POTION_SPELL_IDS = new Set([
+  // --- mana restore ---
+  28555, // Super Mana Potion
+  38961, // Fel Mana Potion
+  33733, // Unstable Mana Potion
+  28586, // Super Rejuvenation Potion (mana + health)
+  45061, // Mad Alchemist's Potion (mana + health + random elixir)
+  27869, // Dark Rune    (mana at cost of health; healthstone-shared CD)
+  16666, // Demonic Rune (mana at cost of health; healthstone-shared CD)
+
+  // --- health restore ---
+  28551, // Super Healing Potion
+  33732, // Volatile Healing Potion
+  38962, // Fel Regeneration Potion (HoT)
+
+  // --- offensive / burst ---
   28564, // Haste Potion
   28565, // Destruction Potion
   28550, // Insane Strength Potion
-  38961, // Fel Mana Potion
-  28555, // Super Mana Potion
-  28551, // Super Healing Potion
+  28563, // Heroic Potion
+
+  // --- defensive / utility ---
+  28579, // Ironshield Potion (+2500 armor)
+  28554, // Shrouding Potion (threat drop)
+  28562, // Major Dreamless Sleep Potion
+
+  // --- school protection potions (situational: Vashj, Kael, Archimonde, ...) ---
+  // Note: including these credits a "potion used" on any pull where someone
+  // chugs a protection pot. Comment out this block if you only want to score
+  // mana/health/offensive consumable usage.
+  28571, // Major Fire Protection Potion
+  28572, // Major Frost Protection Potion
+  28573, // Major Nature Protection Potion
+  28575, // Major Arcane Protection Potion
+  28576, // Major Shadow Protection Potion
+  28577, // Major Holy Protection Potion
 ]);
 
 // Per-boss "avoidable" mechanic spell IDs, keyed by encounterID.
