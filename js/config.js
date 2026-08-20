@@ -44,54 +44,69 @@ export const CONSUMABLE_PATTERNS = {
   food:   /well fed/i,
 };
 
-// Optional escape hatch: force-count a buff by its AURA spell ID (matched in
-// SPELL_AURA_APPLIED). Empty by default because the name patterns above
-// already cover every flask & elixir used in TBC raiding. Use this only if a
-// log shows a buff whose NAME doesn't match the patterns — e.g. a non-English
-// client, or some obscure leftover you want tracked. Example:
-//   export const EXTRA_FLASK_IDS = new Set([ 17628 ]); // "Supreme Power" by ID
-export const EXTRA_FLASK_IDS  = new Set([]);
-export const EXTRA_ELIXIR_IDS = new Set([]);
+// Force-count a buff by its AURA spell ID (matched in SPELL_AURA_APPLIED).
+// These IDs were taken directly from real combat logs, so they're the actual
+// aura IDs — the primary detection path. The name regexes above are kept as a
+// backstop, but every flask/elixir observed in the logs is pinned by ID here.
+export const EXTRA_FLASK_IDS = new Set([
+  28520, // Flask of Relentless Assault
+  28540, // Flask of Pure Death
+  28521, // Flask of Blinding Light
+  28518, // Flask of Fortification
+  28519, // Flask of Mighty Restoration
+  17628, // Flask of Supreme Power   (buff "Supreme Power")
+  17627, // Flask of Distilled Wisdom (buff "Distilled Wisdom")
+]);
 
-// Combat potions cast mid-fight (SPELL_CAST_SUCCESS), by spell ID.
-// IDs verified against Wowhead TBC Classic (patch 2.5.6).
-// Grouped so you can comment out a whole category you don't want to score.
+export const EXTRA_ELIXIR_IDS = new Set([
+  39627, // Elixir of Draenic Wisdom
+  28491, // Elixir of Healing Power
+  33721, // Adept's Elixir
+  28497, // Elixir of Major Agility
+  28503, // Elixir of Major Shadow Power
+  16589, // Noggenfogger Elixir
+  17539, // Greater Arcane Elixir
+  39625, // Elixir of Major Fortitude
+  38954, // Fel Strength Elixir
+  28502, // Elixir of Major Defense
+  33720, // Onslaught Elixir
+]);
+
+// Combat potions, matched by the potion's USE (cast) spell ID as it appears
+// in SPELL_CAST_SUCCESS when the potion is DRUNK.
+//
+// IMPORTANT — this is the USE spell, NOT the alchemy recipe. Wowhead's spell
+// page for a potion (e.g. spell 28555 "Super Mana Potion") is the crafting
+// recipe, filed under "Profession Spells"; that ID only fires when an
+// alchemist MAKES the potion and never appears in a raid log. The earlier
+// version of this file used those recipe IDs, so potion detection silently
+// matched nothing. Every ID below is the verified drink/use spell.
+//
+// Restore potions share ONE use-spell across their whole tier, so a single ID
+// covers the alchemy version and every vendor/instance re-skin at once.
 export const POTION_SPELL_IDS = new Set([
-  // --- mana restore ---
-  28555, // Super Mana Potion
-  38961, // Fel Mana Potion
-  33733, // Unstable Mana Potion
-  28586, // Super Rejuvenation Potion (mana + health)
-  45061, // Mad Alchemist's Potion (mana + health + random elixir)
-  27869, // Dark Rune    (mana at cost of health; healthstone-shared CD)
-  16666, // Demonic Rune (mana at cost of health; healthstone-shared CD)
+  // --- observed in logs (mana) ---
+  28499, // Super Mana Potion ("Restore Mana"); shared by Auchenai/Crystal Mana
+         //  and the other 1800-3000 re-skins, so this one ID covers all of them
+  41618, // Bottled Nethergon Energy (mana; Tempest Keep instances only)
+  41617, // Restore Mana — minor/lesser instance mana potion
+  17531, // Major Mana Potion (classic 1350-2250 tier)
 
-  // --- health restore ---
-  28551, // Super Healing Potion
-  33732, // Volatile Healing Potion
-  38962, // Fel Regeneration Potion (HoT)
+  // --- observed in logs (health) ---
+  28495, // Super Healing Potion ("Healing Potion"); shared by Auchenai/Crystal
+         //  Healing and the other 1500-2500 re-skins
+  41619, // Bottled Nethergon Vapor (health; Tempest Keep only). NB: the item
+         //  page lists 41620; logs show 41619, so both are included for safety.
+  41620,
 
-  // --- offensive / burst ---
-  28564, // Haste Potion
-  28565, // Destruction Potion
-  28550, // Insane Strength Potion
-  28563, // Heroic Potion
+  // --- observed in logs (offensive / combo) ---
+  28507, // Haste Potion ("Haste", +400 haste rating)
+  28508, // Destruction Potion (+120 spell dmg / +2% spell crit)
+  45051, // Mad Alchemist's Potion (random mana/health/elixir)
 
-  // --- defensive / utility ---
-  28579, // Ironshield Potion (+2500 armor)
-  28554, // Shrouding Potion (threat drop)
-  28562, // Major Dreamless Sleep Potion
-
-  // --- school protection potions (situational: Vashj, Kael, Archimonde, ...) ---
-  // Note: including these credits a "potion used" on any pull where someone
-  // chugs a protection pot. Comment out this block if you only want to score
-  // mana/health/offensive consumable usage.
-  28571, // Major Fire Protection Potion
-  28572, // Major Frost Protection Potion
-  28573, // Major Nature Protection Potion
-  28575, // Major Arcane Protection Potion
-  28576, // Major Shadow Protection Potion
-  28577, // Major Holy Protection Potion
+  // --- not in these logs, kept for coverage (common raid pots) ---
+  38929, // Fel Mana Potion ("Fel Mana", 3200 mana over 24s)
+  28494, // Insane Strength Potion (+120 Str / -75 defense)
 ]);
 
 // Per-boss "avoidable" mechanic spell IDs, keyed by encounterID.
