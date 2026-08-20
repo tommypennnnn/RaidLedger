@@ -15,26 +15,41 @@ export const SUPABASE_ANON_KEY = "sb_publishable_PJ1QUm6oLlCptHiRgWrUPw_MjbS9tGz
 //  precise, well-known IDs.
 // ---------------------------------------------------------------------
 
-// Aura-name patterns (case-insensitive) for buffs in SPELL_AURA_APPLIED.
-//  - flask:  every flask in the game is named "Flask of ..." (TBC, Shattrath,
-//            Unstable, and leftover Classic flasks all included), so /flask/i
-//            already covers 100% of them.
-//  - elixir: every TBC battle/guardian elixir is named "Elixir ...". The one
-//            common raid consumable in the guardian slot that ISN'T named
-//            "elixir" is the classic Mageblood Potion, so we add it by name.
-//            (Ultra-rare Classic leftovers — Winterfall Firewater, Juju
-//             Might/Power, Ground Scorpok Assay, Zanza buffs — can be added
-//             the same way if your logs ever show them.)
-//  - food:   TBC stat foods apply the "Well Fed" aura. If you ever see a food
-//            being missed, widen this the same way.
+// Aura-name patterns (case-insensitive), tested against the buff name in
+// SPELL_AURA_APPLIED. Detection is by the *buff* name, which is NOT always
+// the item name — see the Classic flasks below.
+//
+//  - flask:  Every TBC flask (incl. Shattrath and Unstable variants) applies a
+//            buff literally named "Flask of ...", so /flask/i catches them.
+//            The leftover *Classic* flasks used in TBC raiding apply an
+//            EFFECT-named buff with no "flask" in it, so they're added by name:
+//              "Supreme Power"        = Flask of Supreme Power  (+70 spell dmg, all schools)
+//              "Distilled Wisdom"     = Flask of Distilled Wisdom (+65 Intellect)
+//              "Chromatic Resistance" = Flask of Chromatic Resistance (+25 all resist)
+//
+//  - elixir: Every TBC battle & guardian elixir applies an "Elixir ..."-named
+//            buff, so /elixir/i catches all of them. "mageblood" also catches
+//            the classic Mageblood Potion (guardian slot, buff "Mageblood").
+//            (Truly obscure Classic battle-elixir leftovers — Winterfall
+//             Firewater, Juju Might/Power, Ground Scorpok Assay, R.O.I.D.S.,
+//             the Zanza buffs — are essentially never used in TBC raids since
+//             TBC elixirs are strictly better; add their buff names here if
+//             your guild somehow runs them.)
+//
+//  - food:   TBC stat foods apply the "Well Fed" aura. If a food is ever
+//            missed, widen this the same way.
 export const CONSUMABLE_PATTERNS = {
-  flask:  /flask/i,
+  flask:  /flask|supreme power|distilled wisdom|chromatic resistance/i,
   elixir: /elixir|mageblood/i,
   food:   /well fed/i,
 };
 
-// Optional extra buff spell IDs to force-count. Usually leave empty because
-// the name patterns above already catch everything relevant.
+// Optional escape hatch: force-count a buff by its AURA spell ID (matched in
+// SPELL_AURA_APPLIED). Empty by default because the name patterns above
+// already cover every flask & elixir used in TBC raiding. Use this only if a
+// log shows a buff whose NAME doesn't match the patterns — e.g. a non-English
+// client, or some obscure leftover you want tracked. Example:
+//   export const EXTRA_FLASK_IDS = new Set([ 17628 ]); // "Supreme Power" by ID
 export const EXTRA_FLASK_IDS  = new Set([]);
 export const EXTRA_ELIXIR_IDS = new Set([]);
 
