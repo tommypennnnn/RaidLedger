@@ -204,6 +204,15 @@ async function renderPlayerProfile(pid){
   const p=rankArr[0];
   if(!p){ root().innerHTML=`<div class="card"><div class="empty">Player not found.</div></div>`; return; }
   const byDate=[...prep].sort((a,b)=>new Date(a.raids?.raid_date)-new Date(b.raids?.raid_date));
+
+  // Bosses where this player actually cast a potion, per raid, from the stored
+  // consumable timeline. Ordered by first use; counts repeat potions per boss.
+  const potionBossByRaid=new Map(); // raid_id -> [{boss, count}]
+  for(const ev of cevents){ if(ev.kind!=="potion"||!ev.boss_name) continue;
+    if(!potionBossByRaid.has(ev.raid_id)) potionBossByRaid.set(ev.raid_id,[]);
+    const arr=potionBossByRaid.get(ev.raid_id); const hit=arr.find((x)=>x.boss===ev.boss_name);
+    if(hit) hit.count++; else arr.push({boss:ev.boss_name,count:1}); }
+  const potionBossNames=(rid)=>(potionBossByRaid.get(rid)||[]).map((x)=>x.boss);
   ppTrend=byDate;
   const avg=(k)=> prep.length?Math.round(prep.reduce((a,r)=>a+r[k],0)/prep.length):0;
   const consumCell=(r)=>{ const buff=r.flask_name?esc(r.flask_name):(r.elixir_names?esc(r.elixir_names):`<span style="color:var(--bad-ink)">no flask/elixir</span>`);
@@ -254,7 +263,7 @@ async function renderPlayerProfile(pid){
         <td class="num">${pct(r.flask_uptime_pct)}</td>
         <td class="num">${pct(r.elixir_uptime_pct)}</td>
         <td class="num">${pct(r.food_uptime_pct)}</td>
-        <td class="num" title="${r.potions_used} potion(s) cast, ${r.potions_effective} during boss fights${r.potions_used>r.potions_effective?` (${r.potions_used-r.potions_effective} wasted on wipes)`:``}" style="color:${pctColor(r.potion_score)};font-weight:600">${Math.round(r.potion_score/100*r.legit_pulls)}/${r.legit_pulls}</td>
+        <td class="num" title="${r.potions_used} potion(s) cast, ${r.potions_effective} during boss fights${r.potions_used>r.potions_effective?` (${r.potions_used-r.potions_effective} wasted on wipes)`:``}" style="color:${pctColor(r.potion_score)};font-weight:600">${Math.round(r.potion_score/100*r.legit_pulls)}/${r.legit_pulls}${potionBossNames(r.raid_id).length?`<div style="font-size:.72rem;color:var(--muted);font-weight:400;margin-top:.2rem;white-space:normal;text-align:right;max-width:170px;margin-left:auto">${esc(potionBossNames(r.raid_id).join(", "))}</div>`:``}</td>
         <td class="num" style="font-weight:600">${r.preparedness_score}</td>
         <td>${consumCell(r)}</td></tr>`).join("")||`<tr><td colspan="8"><div class="empty">No raids recorded.</div></td></tr>`}</tbody>
     </table></div>
@@ -311,7 +320,16 @@ async function renderPlayerProfile(pid){
     const row=byDate.find((r)=>r.raid_id===rid);
     const evs=(ceByRaid.get(rid)||[]).sort((a,b)=>new Date(a.event_time)-new Date(b.event_time));
     const KTAG={potion:"warn",food:"good",flask:"neutral",elixir:"neutral"};
+    const pb=potionBossByRaid.get(rid)||[];
+    const covered=Math.round((row?.potion_score||0)/100*(row?.legit_pulls||0));
+    const potionSummary = pb.length
+      ? `<div style="margin-bottom:.9rem">
+           <div class="sub" style="margin-bottom:.4rem">Potions by boss${row?.legit_pulls?` — ${covered}/${row.legit_pulls} boss pulls covered`:``}</div>
+           <div style="display:flex;flex-wrap:wrap;gap:.35rem">${pb.map((x)=>`<span class="tag warn">${esc(x.boss)}${x.count>1?` ×${x.count}`:``}</span>`).join("")}</div>
+         </div>`
+      : `<div class="sub" style="margin-bottom:.9rem">No combat potions recorded on a boss this night.</div>`;
     const body=`<div class="sub" style="margin-bottom:.6rem">${esc(p.name)} — everything they flasked, ate, and drank that night, in order.</div>
+      ${potionSummary}
       <div class="tablewrap"><table><thead><tr><th class="no-sort">Time</th><th class="no-sort">Type</th><th class="no-sort">Consumable</th><th class="no-sort">During</th></tr></thead>
       <tbody>${evs.map((e)=>`<tr><td class="num">${new Date(e.event_time).toLocaleTimeString()}</td><td><span class="tag ${KTAG[e.kind]||"neutral"}">${esc(e.kind)}</span></td><td>${esc(e.name||"")}</td><td>${esc(e.boss_name||"— (between pulls)")}</td></tr>`).join("")||`<tr><td colspan="4"><div class="empty">No consumable events recorded for this raid.</div></td></tr>`}</tbody></table></div>`;
     openModal(`Consumables — ${fmtDate(row?.raids?.raid_date)}`, body);
